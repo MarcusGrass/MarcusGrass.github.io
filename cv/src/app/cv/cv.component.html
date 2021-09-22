@@ -1,0 +1,101 @@
+<div>
+  <div class="cv-header">
+    <div class="title">{{cv.title}}</div>
+    <div class="occupation">{{cv.occupation}}</div>
+    <img alt="profile" src="../../assets/picture.jpeg" id="profile-image">
+    <div class="about">{{cv.about}}</div>
+    <div class="link-box">
+      <a href="{{cv.github}}">GitHub</a><a href="{{cv.linkedin}}">Linkedin</a>
+    </div>
+  </div>
+
+
+  <mat-expansion-panel hideToggle *ngIf="cv.projects.length > 0">
+    <mat-expansion-panel-header>
+      <mat-panel-title>
+        Languages
+      </mat-panel-title>
+      <mat-panel-description>
+        By project hours
+      </mat-panel-description>
+    </mat-expansion-panel-header>
+    <div id="language-chart">
+      <ngx-charts-bar-vertical
+        [results]="language_data"
+        [xAxis]="true"
+        [yAxis]="true"
+      ></ngx-charts-bar-vertical>
+    </div>
+  </mat-expansion-panel>
+
+  <mat-expansion-panel hideToggle *ngIf="cv.education.length > 0">
+    <mat-expansion-panel-header>
+      <mat-panel-title>
+        Education
+      </mat-panel-title>
+    </mat-expansion-panel-header>
+    <div class="sub-section" *ngFor="let education of cv.education">
+      <div class="sub-menu-title"><mat-icon>school</mat-icon>  {{education.institution}}</div>
+      <div class="sub-sub-menu-title">{{education.mainSubject}} - {{education.specialization}}</div>
+      <div class="list" *ngFor="let level of education.level"><mat-icon>military_tech</mat-icon> {{level}}</div>
+      <div class="duration"><mat-icon>date_range</mat-icon>  {{education.startDate}} - {{education.endDate || "present"}}</div>
+    </div>
+  </mat-expansion-panel>
+  <mat-expansion-panel hideToggle *ngIf="cv.employment.length > 0">
+    <mat-expansion-panel-header>
+      <mat-panel-title>
+        Employment
+      </mat-panel-title>
+    </mat-expansion-panel-header>
+    <div class="sub-section" *ngFor="let employment of cv.employment">
+      <div class="sub-menu-title">{{employment.company}}</div>
+      <div class="employment" *ngFor="let role of employment.roles">
+        <div class="sub-sub-menu-title with-icon"><mat-icon>engineering</mat-icon> {{role.title}}</div>
+        <div class="description"><mat-icon>description</mat-icon> {{role.description}}</div>
+        <div class="scope"><mat-icon>schedule</mat-icon> {{role.scope}}</div>
+        <div class="duration"><mat-icon>date_range</mat-icon>  {{role.startDate}} - {{role.endDate || "present"}}</div>
+      </div>
+    </div>
+  </mat-expansion-panel>
+  <mat-expansion-panel hideToggle *ngIf="cv.projects.length > 0">
+    <mat-expansion-panel-header>
+      <mat-panel-title>
+        Projects
+      </mat-panel-title>
+    </mat-expansion-panel-header>
+    <mat-expansion-panel class="mat-sub-panel" hideToggle *ngIf="commercialProjects.length">
+      <mat-expansion-panel-header>
+        <mat-panel-title>
+          Commercial
+        </mat-panel-title>
+      </mat-expansion-panel-header>
+      <div class="sub-section" *ngFor="let project of commercialProjects">
+        <div class="sub-menu-title">{{project.name}}</div>
+        <div class="client"><mat-icon>business</mat-icon> {{project.company}} - {{project.role}}</div>
+        <div class="description"><mat-icon>description</mat-icon> {{project.description}}</div>
+        <div class="duration"><mat-icon>date_range</mat-icon>{{project.startDate}} - {{project.endDate || "present"}}</div>
+        <div *ngIf="project.links != null">
+          <div class="list" *ngFor="let link of project.links"><mat-icon>link</mat-icon>  <a href="{{link}}">{{link}}</a></div>
+        </div>
+        <div *ngIf="project.github != null"><mat-icon>code</mat-icon>  <a href="{{project.github}}">{{project.github}}</a></div>
+      </div>
+    </mat-expansion-panel>
+    <mat-expansion-panel class="mat-sub-panel" hideToggle *ngIf="personalProjects.length">
+      <mat-expansion-panel-header>
+        <mat-panel-title>
+          Personal
+        </mat-panel-title>
+      </mat-expansion-panel-header>
+      <div class="sub-section" *ngFor="let project of personalProjects">
+        <div class="sub-menu-title">{{project.name}}</div>
+        <div class="project-role">{{project.role}}</div>
+        <div class="description"><mat-icon>description</mat-icon> {{project.description}}</div>
+        <div class="duration"><mat-icon>date_range</mat-icon>{{project.startDate}} - {{project.endDate || "present"}}</div>
+        <div *ngIf="project.links != null">
+          <div class="list" *ngFor="let link of project.links"><mat-icon>link</mat-icon>  <a href="{{link}}">{{link}}</a></div>
+        </div>
+        <div *ngIf="project.github != null"><mat-icon>code</mat-icon>  <a href="{{project.github}}">{{project.github}}</a></div>
+      </div>
+    </mat-expansion-panel>
+  </mat-expansion-panel>
+</div>
