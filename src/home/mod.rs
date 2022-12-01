@@ -1,9 +1,9 @@
 use yew::prelude::*;
+use yew_router::scope_ext::RouterScopeExt;
+use yew_router::{BrowserRouter, Routable, Switch};
 
 use crate::markdown::render_markdown;
-use crate::write_ups::{PGWM03_BYTES, TEST_BYTES};
-
-const HOME_BYTES: &str = include_str!("Home.md");
+use crate::write_ups::{HOME, PGWM03, TEST};
 
 pub enum Msg {
     Navigate(Location),
@@ -13,10 +13,13 @@ pub struct Home {
     current_page: Location,
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Routable)]
 pub enum Location {
+    #[at("/")]
     Home,
+    #[at("/pgwm03")]
     Pgwm03,
+    #[at("/test")]
     Test,
 }
 
@@ -29,30 +32,37 @@ impl Home {
             Location::Pgwm03 => (regular_nav, selected_nav, regular_nav),
             Location::Test => (regular_nav, regular_nav, selected_nav),
         };
+        let nav = ctx.link().navigator().unwrap();
+        let nav_c = nav.clone();
+        let home_nav = Callback::from(move |_| nav_c.push(&Location::Home));
+        let nav_c = nav.clone();
+        let pgwm03_nav = Callback::from(move |_| nav_c.push(&Location::Pgwm03));
+        let nav_c = nav.clone();
+        let test_nav = Callback::from(move |_| nav_c.push(&Location::Test));
+
         html! {
-            <div>
-                <div class={{home}} onclick={ctx.link().callback(|_| Msg::Navigate(Location::Home))}>
-                    <div class="nav-link-text">
+            <div class="flex-parent">
+                <button class={{home}} onclick={home_nav}>
                         {{"Home"}}
-                    </div>
-                </div>
-                <div id="write-ups">
-                    <div class={{pgwm}} onclick={ctx.link().callback(|_| Msg::Navigate(Location::Pgwm03))}>
-                        <div class="nav-link-text">
-                            {{"Pgwm 0.3"}}
-                        </div>
-                    </div>
-                    <div class={{test}} onclick={ctx.link().callback(|_| Msg::Navigate(Location::Test))}>
-                        <div class="nav-link-text">
-                            {{"Test nav"}}
-                        </div>
-                    </div>
-                </div>
+                </button>
+                <button class={{pgwm}} onclick={pgwm03_nav}>
+                        {{"Pgwm 0.3"}}
+                </button>
+                <button class={{test}} onclick={test_nav}>
+                    {{"Test nav"}}
+                </button>
             </div>
         }
     }
 }
-
+fn render_content(location: Location) -> Html {
+    let content = match location {
+        Location::Home => render_markdown(HOME),
+        Location::Pgwm03 => render_markdown(PGWM03),
+        Location::Test => render_markdown(TEST),
+    };
+    content
+}
 impl Component for Home {
     type Message = Msg;
     type Properties = ();
@@ -79,25 +89,17 @@ impl Component for Home {
     }
 
     fn view(&self, ctx: &Context<Self>) -> Html {
-        let content = match self.current_page {
-            Location::Home => render_markdown(HOME_BYTES),
-            Location::Pgwm03 => render_markdown(PGWM03_BYTES),
-            Location::Test => render_markdown(TEST_BYTES),
-        };
         let side = self.render_sidebar(ctx);
         html! {
             <>
-            <div id="header">
-                {{"Marcus Grass' pages"}}
+            <div id="nav">
+                {side}
             </div>
-            <div class="flex-parent" id="page-content">
-                <div id="sidebar">
-                    {side}
-                </div>
-                <div id="content">
-                    <div id="markdown-text">
-                        {content}
-                    </div>
+            <div id="content">
+                <div id="markdown-text">
+                    <BrowserRouter>
+                        <Switch<Location> render={render_content} />
+                    </BrowserRouter>
                 </div>
             </div>
             </>

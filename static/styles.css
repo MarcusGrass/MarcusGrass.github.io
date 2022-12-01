@@ -2,10 +2,9 @@ body {
     background-color: #e6eaed;
 }
 
-#header {
-    font-size: 64px;
-    text-align: center;
-    margin-bottom: 50px;
+#nav {
+    margin-top: 10px;
+    margin-bottom: 20px;
 }
 
 .flex-parent {
@@ -16,29 +15,20 @@ body {
     width: 100%;
 }
 
-@media (max-width: 960px) {
-    #sidebar {
-        flex: 0 0 5%;
-        max-width: 5%;
-    }
-
+@media screen and (max-width: 960px) {
     #content {
-        flex: 1;
+        margin-left: 5%;
         margin-right: 5%;
         background-color: #edf0f2;
         height: 100%;
     }
 }
 
-@media (min-width: 960px) {
-    #sidebar {
-        flex: 0 0 20%;
-        max-width: 20%;
-    }
-
+@media screen and (min-width: 960px) {
     #content {
-        flex: 1;
+        margin-left: 20%;
         margin-right: 20%;
+        max-width: 1200px;
         background-color: #edf0f2;
         height: 100%;
     }
@@ -51,11 +41,7 @@ body {
 }
 
 .nav-link-box {
-    padding-top: 1%;
-    padding-bottom: 1%;
-    margin-left: 2%;
-    padding-left: 0.5%;
-    width: 45%;
+    flex: 1;
     border-radius: 5px;
 }
 
