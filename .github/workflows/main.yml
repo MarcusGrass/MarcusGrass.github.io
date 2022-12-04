@@ -13,7 +13,5 @@ jobs:
     container: marcusgrass/pages-check:latest
     steps:
       - uses: actions/checkout@v3
-      - name: Build
-        run: trunk build --release
       - name: Publish
-        run: git push origin `git subtree split --prefix dist main`:gh-pages --force
+        run: bash ${GITHUB_WORKSPACE}/.github/publish-pages.sh
