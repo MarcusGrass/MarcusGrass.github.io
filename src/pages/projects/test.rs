@@ -1,7 +1,8 @@
 const RAW_HTML: &str = "<h1>Here's a test write-up</h1>
 <p>I always test in prod, please hire me.</p>
 <pre><code class=\"language-rust\">fn main() {
-    panic!(&quot;At least it's highlighted...&quot;);
+    panic!(&quot;I wish this was highlighted, but it's been painful \\
+    getting that to work without exploding the site's size...&quot;);
 }
 </code></pre>
 ";

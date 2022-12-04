@@ -125,11 +125,11 @@ fn generate_from_options(ctx: &Context<Sidebar>, options: &'static [MenuOption])
         options_html.push(generate_item(ctx, opt));
     }
     let inner = options_html.into_iter().collect::<Html>();
-    return html! {
+    html! {
         <div class="menu-vertical">
             { inner }
         </div>
-    };
+    }
 }
 
 fn generate_item(ctx: &Context<Sidebar>, opt: &MenuOption) -> Html {
