@@ -16,4 +16,4 @@ jobs:
       - name: Build
         run: trunk build --release
       - name: Publish
-        run: git subtree push --prefix dist origin gh-pages
+        run: git push origin `git subtree split --prefix dist main`:gh-pages --force
