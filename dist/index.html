@@ -1,73 +1,14 @@
 <!DOCTYPE html><html lang="en"><head>
     
     <link rel="stylesheet" href="static/styles.css">
-    <link rel="stylesheet" href="static/highlight.min.css">
-    <script src="static/highlight.min.js"></script>
-    <script src="static/highlight-rust.min.js"></script>
-    <script src="static/shell.min.js"></script>
-    <script src="static/json.min.js"></script>
-    <script src="static/markdown.min.js"></script>
-    <script>
-    var last_change = +new Date;
-    var mutationObserver = new MutationObserver(function(mutations) {
-      mutations.forEach(function(mutation) {
-        var tgt = mutation.target;
-        if (tgt.id === "markdown-text") {
-            var now = +new Date;
-            var diff = now - last_change;
-            // We need to throttle this, or it'll infinitely cycle, guh
-            // 100 ms is probably fine, 250 is noticable on fast switching, I'm bad at FE who would have known
-            if (diff > 250) {
-                hljs.highlightAll();
-                last_change = +new Date;
-            }
-        }
-      });
-    });
-    mutationObserver.observe(document.documentElement, {
-      attributes: true,
-      characterData: true,
-      childList: true,
-      subtree: true,
-      attributeOldValue: true,
-      characterDataOldValue: true
-    });
-
-    </script>
+    <link rel="stylesheet" href="static/github-markdown.css">
     <meta charset="UTF-8">
     <title>Marcus Grass' pages</title>
     <style>
     </style>
 
-<link rel="preload" href="/pages-6af3a84ae973fda6_bg.wasm" as="fetch" type="application/wasm" crossorigin="">
-<link rel="modulepreload" href="/pages-6af3a84ae973fda6.js"></head>
+<link rel="preload" href="/pages-9cc2a5eab3f28195_bg.wasm" as="fetch" type="application/wasm" crossorigin="">
+<link rel="modulepreload" href="/pages-9cc2a5eab3f28195.js"></head>
 <body>
 
-<script type="module">import init from '/pages-6af3a84ae973fda6.js';init('/pages-6af3a84ae973fda6_bg.wasm');</script><script>(function () {
-    var protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    var url = protocol + '//' + window.location.host + '/_trunk/ws';
-    var poll_interval = 5000;
-    var reload_upon_connect = () => {
-        window.setTimeout(
-            () => {
-                // when we successfully reconnect, we'll force a
-                // reload (since we presumably lost connection to
-                // trunk due to it being killed, so it will have
-                // rebuilt on restart)
-                var ws = new WebSocket(url);
-                ws.onopen = () => window.location.reload();
-                ws.onclose = reload_upon_connect;
-            },
-            poll_interval);
-    };
-
-    var ws = new WebSocket(url);
-    ws.onmessage = (ev) => {
-        const msg = JSON.parse(ev.data);
-        if (msg.reload) {
-            window.location.reload();
-        }
-    };
-    ws.onclose = reload_upon_connect;
-})()
-</script></body></html>
+<script type="module">import init from '/pages-9cc2a5eab3f28195.js';init('/pages-9cc2a5eab3f28195_bg.wasm');</script></body></html>
