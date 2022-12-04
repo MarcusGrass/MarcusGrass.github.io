@@ -5,37 +5,22 @@ body {
 #nav {
     margin-top: 10px;
     margin-bottom: 20px;
+    width: 40%;
 }
 
 .flex-parent {
     display: flex;
 }
 
-#pagecontent {
-    width: 100%;
-}
 
-@media screen and (max-width: 960px) {
-    #content {
-        margin-left: 5%;
-        margin-right: 5%;
-        background-color: #edf0f2;
-        height: 100%;
-    }
+button {
+    all: unset;
+    cursor: pointer;
 }
-
-@media screen and (min-width: 960px) {
-    #content {
-        margin-left: 20%;
-        margin-right: 20%;
-        max-width: 1200px;
-        background-color: #edf0f2;
-        height: 100%;
-    }
-}
-
 
 #markdown-text {
+    padding-top: 10px;
+    padding-bottom: 10px;
     margin-left: 5%;
     margin-right: 5%;
 }
@@ -43,6 +28,7 @@ body {
 .nav-link-box {
     flex: 1;
     border-radius: 5px;
+    margin-right: 5%;
 }
 
 .nav-link-text {
@@ -57,3 +43,37 @@ body {
 .nav-unselected {
     box-shadow: 10px 0 2px #dad9de;
 }
+
+#content {
+    margin-left: calc((100vw - 980px - 45px) / 2)
+}
+
+@media (max-width: 1025px) {
+    #content {
+        margin: 0 auto;
+    }
+}
+
+.markdown-body {
+    box-sizing: border-box;
+    min-width: 200px;
+    max-width: 980px;
+    margin: 0 auto;
+    padding: 45px;
+}
+
+@media (max-width: 767px) {
+    .markdown-body {
+        padding: 15px;
+    }
+}
+
+.menu-item {
+    background-color: lightblue;
+    text-align: center;
+    padding: 5px;
+    border-radius: 3px;
+    margin-right: 5px;
+    margin-top: 5px
+}
+

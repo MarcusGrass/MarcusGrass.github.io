@@ -3,39 +3,7 @@
 <head>
     <link data-trunk rel="copy-dir" href="static">
     <link rel="stylesheet" href="static/styles.css">
-    <link rel="stylesheet" href="static/highlight.min.css">
-    <script src="static/highlight.min.js"></script>
-    <script src="static/highlight-rust.min.js"></script>
-    <script src="static/shell.min.js"></script>
-    <script src="static/json.min.js"></script>
-    <script src="static/markdown.min.js"></script>
-    <script>
-    var last_change = +new Date;
-    var mutationObserver = new MutationObserver(function(mutations) {
-      mutations.forEach(function(mutation) {
-        var tgt = mutation.target;
-        if (tgt.id === "markdown-text") {
-            var now = +new Date;
-            var diff = now - last_change;
-            // We need to throttle this, or it'll infinitely cycle, guh
-            // 100 ms is probably fine, 250 is noticable on fast switching, I'm bad at FE who would have known
-            if (diff > 250) {
-                hljs.highlightAll();
-                last_change = +new Date;
-            }
-        }
-      });
-    });
-    mutationObserver.observe(document.documentElement, {
-      attributes: true,
-      characterData: true,
-      childList: true,
-      subtree: true,
-      attributeOldValue: true,
-      characterDataOldValue: true
-    });
-
-    </script>
+    <link rel="stylesheet" href="static/github-markdown.css">
     <meta charset="UTF-8">
     <title>Marcus Grass' pages</title>
     <style>
