@@ -1,9 +1,11 @@
 #!/bin/sh
-set -e
+set -ex
 git checkout -b tmp-pages
 rm .gitignore
 echo "target\n.idea\n*.iml" > .gitignore
 trunk build --release
+git config --global user.email ci@gmail.com
+git config --global user.name CiAuthor
 git add .
 git commit -m "publish latest"
 git checkout gh-pages
