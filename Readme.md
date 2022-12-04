@@ -11,5 +11,14 @@ removes gitignore, then force pushes from that to `gh-pages`
 
 ### Build
 
-The build-script builds markdown files to .html and then imports them
-and creates a 
+The build-script recursively searches under `pages`,
+it takes all the mds there and converts them to `html`,
+then it creates a corresponding folder structure under `src/pages`
+where it puts the `html`-files, it then creates rust files and raw-imports
+the html files and builds a corresponding module structure.
+
+Therefore, no changes within `src/pages` is permanent across builds.
+
+I should place this under target, but that's a hassle for my ide. We'll see if
+I improve it.
+

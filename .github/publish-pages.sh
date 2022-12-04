@@ -9,7 +9,5 @@ git config --global user.name CiAuthor
 git fetch origin
 git add .
 git commit -m "publish latest"
-git checkout gh-pages
-git reset --hard tmp-pages
-git push -f origin gh-pages
+git push origin `git subtree split --prefix dist tmp-pages`:gh-pages --force
 git branch -D tmp-pages
