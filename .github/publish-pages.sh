@@ -2,7 +2,7 @@
 set -ex
 git checkout -b tmp-pages
 rm .gitignore
-echo "target\n.idea\n*.iml" > .gitignore
+printf "target\n.idea\n*.iml" > .gitignore
 trunk build --release
 git config --global user.email ci@gmail.com
 git config --global user.name CiAuthor
