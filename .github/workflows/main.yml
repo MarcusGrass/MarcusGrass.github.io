@@ -10,11 +10,10 @@ jobs:
   publish:
     name: Pages
     runs-on: ubuntu-latest
+    container: marcusgrass/pages-check:latest
     steps:
       - uses: actions/checkout@v3
       - name: Build
-        uses: actions-rs/cargo@v1
-        with:
-          command: build --release
+        run: trunk build --release
       - name: Publish
         run: git subtree push --prefix dist origin gh-pages

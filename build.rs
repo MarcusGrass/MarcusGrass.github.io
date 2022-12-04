@@ -37,38 +37,36 @@ fn recurse_convert_pages(
         } else if metadata.is_file() {
             let raw = std::fs::read_to_string(&path)
                 .map_err(|e| format!("Failed to read markdown from {path:?} {e}"))?;
-            let content = format_page_mod(&raw);
+            let out_name = file_name.to_str().unwrap();
+            let (name, _md) = out_name.split_once('.').unwrap();
+            let (rust_content, html_content) = format_page_mod(&raw, name);
             let out_name = file_name.to_str().unwrap();
             let (name, _md) = out_name.split_once('.').unwrap();
             let lc_name = name.to_lowercase();
-            let out_file = html_root.join(root_offset).join(format!("{lc_name}.rs"));
+            let rust_out_file = html_root.join(root_offset).join(format!("{lc_name}.rs"));
+            let html_out_file = html_root.join(root_offset).join(format!("{name}.html"));
             let target_dir = html_root.join(root_offset);
             std::fs::create_dir_all(&target_dir).map_err(|e| {
                 format!("Failed to create dir {target_dir:?} to place converted html {e}")
             })?;
-            std::fs::write(&out_file, content.as_bytes())
-                .map_err(|e| format!("Failed to write converted html to {out_file:?} {e}"))?;
+            std::fs::write(&rust_out_file, rust_content.as_bytes())
+                .map_err(|e| format!("Failed to write rust file to {rust_out_file:?} {e}"))?;
+            std::fs::write(&html_out_file, html_content.as_bytes())
+                .map_err(|e| format!("Failed to write converted html to {html_out_file:?} {e}"))?;
             files_here.push(lc_name);
         }
     }
     Ok(files_here)
 }
 
-fn format_page_mod(md_data: &str) -> String {
+fn format_page_mod(md_data: &str, name: &str) -> (String, String) {
     let parser = Parser::new(md_data);
     let cap = md_data.len() * 2;
     let mut html_output: String = String::with_capacity(cap);
     pulldown_cmark::html::push_html(&mut html_output, parser);
-    let mut rust_content = "pub fn page_html() -> yew::Html {\n\tyew::html!{\n\t{\"".to_string();
-    for line in html_output.lines() {
-        let repl = line.replace('\\', "\\\\");
-        let repl = repl.replace('"', "\\\"");
-        let _ = rust_content.write_fmt(format_args!("\t\t{}\n", repl));
-    }
-    rust_content.push_str("\t\"}\n}\n}\n");
     let mut rust_content = format!(
-        "const RAW_HTML: &str = \"{}\";\n\n",
-        html_output.replace('\\', "\\\\").replace('"', "\\\"")
+        "const RAW_HTML: &str = include_str!(\"{}.html\");\n\n",
+        name
     );
     rust_content.push_str(
         "pub fn page_html() -> yew::Html {\n\
@@ -78,7 +76,7 @@ fn format_page_mod(md_data: &str) -> String {
     \tyew::Html::VRef(div.into())\n\
     }\n\n",
     );
-    rust_content
+    (rust_content, html_output)
 }
 
 fn dump_mod(mod_name: &str, dir: &Path, sub_modules: Vec<String>) -> Result<(), String> {
