@@ -10,4 +10,3 @@ git fetch origin
 git add .
 git commit -m "publish latest"
 git push origin `git subtree split --prefix dist tmp-pages`:gh-pages --force
-git branch -D tmp-pages
