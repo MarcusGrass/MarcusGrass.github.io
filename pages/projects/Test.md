@@ -1,6 +1,6 @@
 # Here's a test write-up
 
-I always test in prod, please hire me.
+I always test in prod.
 
 ```rust
 fn main() {

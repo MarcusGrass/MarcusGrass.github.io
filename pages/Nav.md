@@ -1,7 +1,7 @@
 # Table of contents
 
-Because I'm terrible at web-dev and unable to make a side menu scale properly
-I make things easier for myself and made navigation happen through this md-page instead.
+Because I'm terrible at web-dev and unable to make a side menu scale properly,
+I made things easier for myself and made navigation happen through this md-page instead.
 
 ## Top level navigation
 

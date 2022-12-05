@@ -13,8 +13,8 @@ const NOTFOUND_HTML = String.raw`<div class="markdown-body"><h1>Page not found</
 </div>`
 /// Generated code, don't touch.
 const NAV_HTML = String.raw`<div class="markdown-body"><h1>Table of contents</h1>
-<p>Because I'm terrible at web-dev and unable to make a side menu scale properly
-I make things easier for myself and made navigation happen through this md-page instead.</p>
+<p>Because I'm terrible at web-dev and unable to make a side menu scale properly,
+I made things easier for myself and made navigation happen through this md-page instead.</p>
 <h2>Top level navigation</h2>
 <ul>
 <li><a class="self-link" onclick=NAVIGATION.navigate("/")>Home(also top left on this page)</a></li>
@@ -31,16 +31,16 @@ const HOME_HTML = String.raw`<div class="markdown-body"><h1>About</h1>
 <p>This site is a place where I intend to store things I've learned so that I won't forget it.</p>
 <h2>This page</h2>
 <p>There's not supposed to be a web 1.0 vibe to it, but I'm horrible at front-end styling so here we are.<br />
-The site is constructed in <a href="https://github.com/rust-lang/rust">Rust</a> with <a href="https://yew.rs/">Yew</a>,
+The site is constructed in <code>javascript</code> but
 as with all things in my free time I make things more complicated than they need to be.<br />
-Except for the actual content, I pulled in a Markdown renderer so that I don't have to do so much web-work.<br />
-Additionally, the markdown styling is ripped from <a href="https://github.com/sindresorhus/github-markdown-css">this project</a>,
+There is a <code>Rust</code> runner that takes the md-files, generates html and javascript, and then minifies that.<br />
+The markdown styling is ripped from <a href="https://github.com/sindresorhus/github-markdown-css">this project</a>,
 it's GitHub's markdown CSS, I don't want to stray too far out of my comfort zone...</p>
 <p>All page content except for some glue is just rendered markdown contained
 in <a href="https://github.com/MarcusGrass/marcusgrass.github.io">the repo</a>.</p>
 <h2>Content</h2>
-<p>See the menu bar at the top left to navigate, if I end up writing a lot of stuff here I'm going to have to look into
-better navigation and search.</p>
+<p>See the menu bar at the top left to navigate to the table of contents,
+if I end up writing a lot of stuff here I'm going to have to look into better navigation and search.</p>
 <h2>License</h2>
 <p>The license for this pages code can be found in the
 repo <a href="https://github.com/MarcusGrass/marcusgrass.github.io/blob/main/LICENSE">here</a>.<br />
@@ -49,7 +49,7 @@ repo <a href="https://github.com/sindresorhus/github-markdown-css/blob/main/lice
 </div>`
 /// Generated code, don't touch.
 const TEST_HTML = String.raw`<div class="markdown-body"><h1>Here's a test write-up</h1>
-<p>I always test in prod, please hire me.</p>
+<p>I always test in prod.</p>
 <pre><code class="language-rust">fn main() {
     panic!(&quot;I wish this was highlighted, but it's been painful \
     getting that to work without exploding the site's size...&quot;);
@@ -305,6 +305,29 @@ The experience of taking PGWM to <code>no_std</code> and no <code>libc</code> ha
 the same, a bit more efficient, a bit less stable.<br />
 I'll keep working out the bugs and API och <code>tiny-std</code>, plans to do a minimal terminal emulator are still in the back of
 my mind, we'll see if I can find the time.</p>
+</div>`
+/// Generated code, don't touch.
+const META_HTML = String.raw`<div class="markdown-body"><h1>Writing these pages</h1>
+<p>This will be short, I did a number of rewrites, some which could probably be
+found in this repository history.</p>
+<h2>Rust for frontend</h2>
+<p>Rust can target <a href="https://en.wikipedia.org/wiki/WebAssembly">WebAssembly</a> through its target
+<code>wasm32-unknown-unknown</code>, which can then be run on the web. Whether this is a good idea or not remains to be seen.</p>
+<p>I've been working with <code>Rust</code> for a while now, even written code targeting <code>wasm</code>, but hadn't yet written anything
+to be served through a browser using <code>Rust</code>.</p>
+<p>After thinking that I should start writing things down more, I decided to make a blog to collect my thoughts.<br />
+Since I'm a disaster at front-end styling I decided that if I could get something to format markdown, that's good
+enough.<br />
+I could have just kept them as .md files in a git-repo, and that would have been the reasonable thing to do,
+but the concept of a dedicated page for it spoke to me, with GitHub's free hosting I started looking for alternatives
+for a web framework.</p>
+<h2>Yew</h2>
+<p>I didn't search for long before finding <a href="https://yew.rs/">yew</a>, it's a framework for developing front-end applications
+in <code>Rust</code>. It looked pretty good so I started up.</p>
+<p>I like how <code>Yew</code> does things, you construct <code>Components</code> that pass messages and react to them, changing their state.
+Although, I have a personal beef with <code>macros</code> and especially since <code>0.20</code> <code>Yew</code> uses them a lot.</p>
+<p>My first shot was using <a href="https://github.com/raphlinus/pulldown-cmark">pulldown-cmark</a> directly from the <code>Component</code>.<br />
+I included the <code>.md</code>-files as <code>include_str!(...)</code> and then converted those to html withing the component at view-time.</p>
 </div>`
 function render(location) {
 	if (location === Location.HOME.path) {
