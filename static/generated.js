@@ -335,7 +335,7 @@ function render(location) {
 	}
 }
 function create_nav_button(label, link) {
-    return "<div><button class=\"menu-item\" onclick=NAVIGATION.navigate(\"" + link + "\")>" + label + "</button></div>";
+    return "<button class=\"menu-item\" onclick=NAVIGATION.navigate(\"" + link + "\")>" + label + "</button>";
 }
 
 class Navigation {

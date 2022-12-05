@@ -69,7 +69,7 @@ fn create_js() -> String {
     raw.push_str(r#"
 }
 function create_nav_button(label, link) {
-    return "<div><button class=\"menu-item\" onclick=NAVIGATION.navigate(\"" + link + "\")>" + label + "</button></div>";
+    return "<button class=\"menu-item\" onclick=NAVIGATION.navigate(\"" + link + "\")>" + label + "</button>";
 }
 
 class Navigation {
@@ -250,7 +250,7 @@ fn copy_minified(ws: &Path) -> Result<(), String> {
                 return Err(format!(
                     "Only .js and .css files allowed in static dir {:?} found {path:?}",
                     static_dir
-                ))
+                ));
             }
         };
         let file_name = path.file_name().unwrap();
