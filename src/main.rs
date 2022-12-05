@@ -27,38 +27,45 @@ fn main() {
         total_content.extend(content.into_bytes());
     }
     total_content.extend(create_js().into_bytes());
-    std::fs::write(
-        ws_path.join("static").join("generated.js"),
-        &total_content,
-    )
-    .unwrap();
+    std::fs::write(ws_path.join("static").join("generated.js"), &total_content).unwrap();
     copy_minified(&ws_path).unwrap();
 }
 
 fn create_js() -> String {
     let mut raw = String::new();
     raw.push_str("function render(location) {\n");
-    let _ = raw.write_fmt(format_args!("\
+    let _ = raw.write_fmt(format_args!(
+        "\
         \tif (location === Location.{}.path) {{\n\
         {}\
         \t}} else if (location === Location.{}.path) {{\n\
         {}\
         \t}} \
-        ", HOME.tag_name.to_uppercase(), create_inner_render(HOME.tag_name, Some((NAV_LABEL, NAV.path_name))),
-        NAV.tag_name.to_uppercase(), create_inner_render(NAV.tag_name, Some((HOME_LABEL, HOME.path_name)))
+        ",
+        HOME.tag_name.to_uppercase(),
+        create_inner_render(HOME.tag_name, Some((NAV_LABEL, NAV.path_name))),
+        NAV.tag_name.to_uppercase(),
+        create_inner_render(NAV.tag_name, Some((HOME_LABEL, HOME.path_name)))
     ));
     for location in LOCATIONS.into_iter().skip(3) {
-        let _ = raw.write_fmt(format_args!("\
+        let _ = raw.write_fmt(format_args!(
+            "\
             else if (location === Location.{}.path) {{\n\
             {}\
             \t}} \
-        ", location.tag_name.to_uppercase(), create_inner_render(location.tag_name, None)));
+        ",
+            location.tag_name.to_uppercase(),
+            create_inner_render(location.tag_name, None)
+        ));
     }
-    let _ = raw.write_fmt(format_args!("\
+    let _ = raw.write_fmt(format_args!(
+        "\
         else {{\n\
         {}\
         \t}}\
-    ", create_inner_render(NOT_FOUND.tag_name, None)));
+    ",
+        create_inner_render(NOT_FOUND.tag_name, None)
+    ));
     raw.push_str(r#"
 }
 function create_nav_button(label, link) {
@@ -73,13 +80,15 @@ class Navigation {
     navigate(location) {
         if (location !== this.location) {
             window.history.pushState({"pageTitle": location}, "", location);
-            render(location)
+            render(location);
         }
+    }
+    init_nav() {
+        render(self.location);
     }
 }
 let cur = window.location.pathname.split("/").pop();
 let NAVIGATION = new Navigation(cur);
-NAVIGATION.navigate(cur);
     "#);
     raw
 }
@@ -87,19 +96,22 @@ NAVIGATION.navigate(cur);
 fn create_inner_render(tag_name: &str, has_special_nav: Option<(&str, &str)>) -> String {
     let mut base = "\t\tdocument.getElementById(\"menu\")\n".to_string();
     if let Some((nav_label, nav_link)) = has_special_nav {
-        let _ = base.write_fmt(format_args!("\t\t\t.innerHTML = create_nav_button(\"{}\", \"{}\");\n", nav_label, nav_link));
+        let _ = base.write_fmt(format_args!(
+            "\t\t\t.innerHTML = create_nav_button(\"{}\", \"{}\");\n",
+            nav_label, nav_link
+        ));
     } else {
         let _ = base.write_fmt(format_args!("\t\t\t.innerHTML = create_nav_button(\"{}\", \"{}\") + create_nav_button(\"{}\", \"{}\");\n", HOME_LABEL, HOME.path_name, NAV_LABEL, NAV.path_name));
     }
-    let _ = base.write_fmt(format_args!("\t\tdocument.getElementById(\"content\")\n\
-    \t\t\t.innerHTML = {}_HTML;\n", tag_name.to_uppercase()));
+    let _ = base.write_fmt(format_args!(
+        "\t\tdocument.getElementById(\"content\")\n\
+    \t\t\t.innerHTML = {}_HTML;\n",
+        tag_name.to_uppercase()
+    ));
     base
 }
 
-fn recurse_convert_pages(
-    md_root: &Path,
-    root_offset: &Path,
-) -> Result<Vec<String>, String> {
+fn recurse_convert_pages(md_root: &Path, root_offset: &Path) -> Result<Vec<String>, String> {
     let search = md_root.join(root_offset);
     let mut files_here = vec![];
     for entry in
@@ -142,7 +154,6 @@ impl LocationInfo {
     }
 }
 
-
 fn location_file_content() -> String {
     let mut content = "\
     // Generated code, don't touch\n\
@@ -152,7 +163,9 @@ fn location_file_content() -> String {
     for location in LOCATIONS {
         let _ = content.write_fmt(format_args!(
             "\t{}: {{\"path\": \"{}\", \"name\": \"{}\"}},\n",
-            location.tag_name.to_uppercase(), location.path_name, location.tag_name
+            location.tag_name.to_uppercase(),
+            location.path_name,
+            location.tag_name
         ));
     }
     content.push_str("});\n");
@@ -168,23 +181,22 @@ fn format_page_mod(md_data: &str, name: &str) -> String {
     for location in LOCATIONS {
         let replace_match = format!("href=\"{}\"", location.path_name);
         while let Some(_found) = macro_html.find(&replace_match) {
-            macro_html =
-                macro_html.replace(&replace_match, &to_nav_link_fn(location.path_name));
+            macro_html = macro_html.replace(&replace_match, &to_nav_link_fn(location.path_name));
         }
     }
     let js_content = format!(
         "\
         /// Generated code, don't touch.\n\
         const {}_HTML = String.raw`<div class=\"markdown-body\">{}</div>`\n\
-        ", name.to_uppercase(), macro_html
+        ",
+        name.to_uppercase(),
+        macro_html
     );
     js_content
 }
 
 fn to_nav_link_fn(location: &str) -> String {
-    format!(
-        "class=\"self-link\" onclick=NAVIGATION.navigate(\"{location}\")"
-    )
+    format!("class=\"self-link\" onclick=NAVIGATION.navigate(\"{location}\")")
 }
 
 fn copy_minified(ws: &Path) -> Result<(), String> {
@@ -199,35 +211,52 @@ fn copy_minified(ws: &Path) -> Result<(), String> {
     std::fs::copy(&src, &dest)
         .map_err(|e| format!("Failed to copy {:?} to {:?} {e}", src, dest))?;
     let static_dir = ws.join("static");
-    for entry in std::fs::read_dir(&static_dir).map_err(|e| format!("Failed to read dir {:?} {e}", static_dir))? {
+    for entry in std::fs::read_dir(&static_dir)
+        .map_err(|e| format!("Failed to read dir {:?} {e}", static_dir))?
+    {
         let entry = entry.map_err(|e| format!("Failed to read entry at {:?} {e}", static_dir))?;
         let path = entry.path();
-        let metadata = entry.metadata().map_err(|e| format!("Failed to read metadata for {path:?} {e}"))?;
+        let metadata = entry
+            .metadata()
+            .map_err(|e| format!("Failed to read metadata for {path:?} {e}"))?;
         if !metadata.is_file() {
-            return Err(format!("Only regular files allowed in static dir {:?} found something else at {path:?}", static_dir));
+            return Err(format!(
+                "Only regular files allowed in static dir {:?} found something else at {path:?}",
+                static_dir
+            ));
         }
-        let ext = path.extension().ok_or_else(|| format!("Found file without extension in static dir {:?} {path:?}", static_dir))?;
-        let ext_str = ext.to_str().ok_or_else(|| format!("Found non utf8 file extension {ext:?}"))?;
+        let ext = path.extension().ok_or_else(|| {
+            format!(
+                "Found file without extension in static dir {:?} {path:?}",
+                static_dir
+            )
+        })?;
+        let ext_str = ext
+            .to_str()
+            .ok_or_else(|| format!("Found non utf8 file extension {ext:?}"))?;
         let content = std::fs::read_to_string(&path)
             .map_err(|e| format!("Failed to read content for {path:?} {e}"))?;
         let minified = match ext_str {
-            "css" => {
-                minifier::css::minify(&content).map_err(|e| format!("Failed to minify {path:?} {e}"))?
-                    .to_string()
-            }
+            "css" => minifier::css::minify(&content)
+                .map_err(|e| format!("Failed to minify {path:?} {e}"))?
+                .to_string(),
             "js" => {
                 // TODO: Js minify doesn't work with String.raw` gotta create an issue about that and publish this as an example
                 //minifier::js::minify(&content)
                 //    .to_string()
                 content
             }
-            _ => return Err(format!("Only .js and .css files allowed in static dir {:?} found {path:?}", static_dir)),
+            _ => {
+                return Err(format!(
+                    "Only .js and .css files allowed in static dir {:?} found {path:?}",
+                    static_dir
+                ))
+            }
         };
         let file_name = path.file_name().unwrap();
         let out = dist_static.join(file_name);
         std::fs::write(&out, minified)
             .map_err(|e| format!("Failed to write minified content to {out:?} {e}"))?
-
     }
     Ok(())
 }

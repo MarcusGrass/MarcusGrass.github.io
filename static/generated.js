@@ -346,11 +346,13 @@ class Navigation {
     navigate(location) {
         if (location !== this.location) {
             window.history.pushState({"pageTitle": location}, "", location);
-            render(location)
+            render(location);
         }
+    }
+    init_nav() {
+        render(self.location);
     }
 }
 let cur = window.location.pathname.split("/").pop();
 let NAVIGATION = new Navigation(cur);
-NAVIGATION.navigate(cur);
     
