@@ -1,4 +1,64 @@
-<h1>PGWM 0.3, tiny-std, and xcb-parse</h1>
+// Generated code, don't touch
+const Location = Object.freeze({
+	HOME: {"path": "/", "name": "Home"},
+	NAV: {"path": "/table-of-contents", "name": "Nav"},
+	NOTFOUND: {"path": "/not-found", "name": "NotFound"},
+	TEST: {"path": "/test", "name": "Test"},
+	PGWM03: {"path": "/pgwm03", "name": "Pgwm03"},
+});
+/// Generated code, don't touch.
+const NOTFOUND_HTML = String.raw`<div class="markdown-body"><h1>Page not found</h1>
+<p>You seem to have navigated to a page that doesn't exist, sorry!</p>
+<p>You can go back in the navigation menu on the top left, or with <a class="self-link" onclick=NAVIGATION.navigate("/")>this link</a></p>
+</div>`
+/// Generated code, don't touch.
+const NAV_HTML = String.raw`<div class="markdown-body"><h1>Table of contents</h1>
+<p>Because I'm terrible at web-dev and unable to make a side menu scale properly
+I make things easier for myself and made navigation happen through this md-page instead.</p>
+<h2>Top level navigation</h2>
+<ul>
+<li><a class="self-link" onclick=NAVIGATION.navigate("/")>Home(also top left on this page)</a></li>
+<li><a class="self-link" onclick=NAVIGATION.navigate("/table-of-contents")>Table of contents(here, nothing will happen)</a></li>
+</ul>
+<h2>Projects</h2>
+<ul>
+<li><a class="self-link" onclick=NAVIGATION.navigate("/pgwm03")>Pgwm03</a></li>
+<li><a class="self-link" onclick=NAVIGATION.navigate("/test")>Test</a></li>
+</ul>
+</div>`
+/// Generated code, don't touch.
+const HOME_HTML = String.raw`<div class="markdown-body"><h1>About</h1>
+<p>This site is a place where I intend to store things I've learned so that I won't forget it.</p>
+<h2>This page</h2>
+<p>There's not supposed to be a web 1.0 vibe to it, but I'm horrible at front-end styling so here we are.<br />
+The site is constructed in <a href="https://github.com/rust-lang/rust">Rust</a> with <a href="https://yew.rs/">Yew</a>,
+as with all things in my free time I make things more complicated than they need to be.<br />
+Except for the actual content, I pulled in a Markdown renderer so that I don't have to do so much web-work.<br />
+Additionally, the markdown styling is ripped from <a href="https://github.com/sindresorhus/github-markdown-css">this project</a>,
+it's GitHub's markdown CSS, I don't want to stray too far out of my comfort zone...</p>
+<p>All page content except for some glue is just rendered markdown contained
+in <a href="https://github.com/MarcusGrass/marcusgrass.github.io">the repo</a>.</p>
+<h2>Content</h2>
+<p>See the menu bar at the top left to navigate, if I end up writing a lot of stuff here I'm going to have to look into
+better navigation and search.</p>
+<h2>License</h2>
+<p>The license for this pages code can be found in the
+repo <a href="https://github.com/MarcusGrass/marcusgrass.github.io/blob/main/LICENSE">here</a>.<br />
+The license for the styling is under that
+repo <a href="https://github.com/sindresorhus/github-markdown-css/blob/main/license">here</a></p>
+</div>`
+/// Generated code, don't touch.
+const TEST_HTML = String.raw`<div class="markdown-body"><h1>Here's a test write-up</h1>
+<p>I always test in prod, please hire me.</p>
+<pre><code class="language-rust">fn main() {
+    panic!(&quot;I wish this was highlighted, but it's been painful \
+    getting that to work without exploding the site's size...&quot;);
+}
+</code></pre>
+<p>Test some change here!</p>
+</div>`
+/// Generated code, don't touch.
+const PGWM03_HTML = String.raw`<div class="markdown-body"><h1>PGWM 0.3, tiny-std, and xcb-parse</h1>
 <p>I recently made a substantial rewrite of my (now) pure rust x11 window manager and want to collect my thoughts on it
 somewhere.</p>
 <h2>X11 and the Linux desktop</h2>
@@ -245,3 +305,54 @@ The experience of taking PGWM to <code>no_std</code> and no <code>libc</code> ha
 the same, a bit more efficient, a bit less stable.<br />
 I'll keep working out the bugs and API och <code>tiny-std</code>, plans to do a minimal terminal emulator are still in the back of
 my mind, we'll see if I can find the time.</p>
+</div>`
+function render(location) {
+	if (location === Location.HOME.path) {
+		document.getElementById("menu")
+			.innerHTML = create_nav_button("Table of contents", "/table-of-contents");
+		document.getElementById("content")
+			.innerHTML = HOME_HTML;
+	} else if (location === Location.NAV.path) {
+		document.getElementById("menu")
+			.innerHTML = create_nav_button("Home", "/");
+		document.getElementById("content")
+			.innerHTML = NAV_HTML;
+	} else if (location === Location.TEST.path) {
+		document.getElementById("menu")
+			.innerHTML = create_nav_button("Home", "/") + create_nav_button("Table of contents", "/table-of-contents");
+		document.getElementById("content")
+			.innerHTML = TEST_HTML;
+	} else if (location === Location.PGWM03.path) {
+		document.getElementById("menu")
+			.innerHTML = create_nav_button("Home", "/") + create_nav_button("Table of contents", "/table-of-contents");
+		document.getElementById("content")
+			.innerHTML = PGWM03_HTML;
+	} else {
+		document.getElementById("menu")
+			.innerHTML = create_nav_button("Home", "/") + create_nav_button("Table of contents", "/table-of-contents");
+		document.getElementById("content")
+			.innerHTML = NOTFOUND_HTML;
+	}
+}
+function create_nav_button(label, link) {
+    return "<div><button class=\"menu-item\" onclick=NAVIGATION.navigate(\"" + link + "\")>" + label + "</button></div>";
+}
+
+class Navigation {
+    constructor(location) {
+        this.location = location;
+    }
+
+    navigate(location) {
+        if (location !== this.location) {
+            window.history.pushState({"pageTitle": location}, "", location);
+            render(location);
+        }
+    }
+    init_nav() {
+        render(self.location);
+    }
+}
+let cur = window.location.pathname.split("/").pop();
+let NAVIGATION = new Navigation(cur);
+    

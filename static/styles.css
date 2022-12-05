@@ -22,19 +22,12 @@
     padding: 5px;
     border-radius: 3px;
     margin-right: 5px;
-    margin-top: 5px
+    margin-top: 5px;
 }
 
-#nav {
-    margin-top: 10px;
-    margin-bottom: 20px;
-    width: 40%;
+.self-link {
+    cursor: pointer;
 }
-
-.flex-parent {
-    display: flex;
-}
-
 
 button {
     all: unset;
@@ -48,27 +41,8 @@ button {
     margin-right: 5%;
 }
 
-.nav-link-box {
-    flex: 1;
-    border-radius: 5px;
-    margin-right: 5%;
-}
-
-.nav-link-text {
-    font-size: 160%;
-    margin-left: 10%;
-}
-
-.nav-selected {
-    box-shadow: 10px 0 2px #bab9bd;
-}
-
-.nav-unselected {
-    box-shadow: 10px 0 2px #dad9de;
-}
-
 #content {
-    margin-left: calc((100vw - 980px - 45px) / 2)
+    margin-left: calc((100vw - 980px - 45px) / 2);
 }
 
 @media (max-width: 1025px) {
