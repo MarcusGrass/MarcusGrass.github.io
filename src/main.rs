@@ -88,11 +88,11 @@ class Navigation {
     navigate(location) {
         window.history.pushState({"pageTitle": location}, "", location);
         render(location);
-        self.location = location;
+        this.location = location;
     }
     init_nav() {
-        console.log("Init nav to" + self.location);
-        render(self.location);
+        console.log("Init nav to " + this.location);
+        render(this.location);
     }
 }
 let cur = window.location.pathname.split("/").pop();

@@ -471,6 +471,37 @@ const TEST_HTML = String.raw`<div class="markdown-body"><h1>Here's a test write-
 }
 </pre></div>
 <p>Test some change here!</p>
+</div>`;
+const REDDIT_HTML = String.raw`<div class="markdown-body"><p>It's been quite some time since I last published an update to <code>pgwm</code>
+and <a href="https://old.reddit.com/r/rust/comments/u00vxm/i_wrote_an_x11_tiling_window_manager_inspired_by/">posted this</a>.<br>
+I've been pretty busy but I've changed a lot about it since then, it's been a learning experience with an insane amount
+of yak shaving.</p>
+<h1>Some highlights:</h1>
+<ul>
+<li>Rewrote the <code>xcb</code> interfacing library (really stupid, took an insane amount of time)</li>
+<li>Wrote a tiny std-lib for Linux (essentially only <code>x86_64</code>, working with getting everything to work for <code>aarch64</code>)</li>
+<li>Migrated the wm to be <code>no_std</code> with no libc.</li>
+</ul>
+<h1>Why</h1>
+<p>I was thinking about specializing <a href="https://github.com/psychon/x11rb">x11rb</a> which is a great library for interfacing
+with X11,
+to my specific single threaded use case.</p>
+<p>At some point I realized that I could try to make the WM entirely <code>no_std</code> and then, entirely without libc which was a
+really fun challenge.</p>
+<h1>Tiny-std</h1>
+<p>There are a lot of cool things to find when digging into the Linux APIs and <code>glibc</code> and <code>musl</code> source. I learned a lot
+in the process and wrote about
+that at some length <a href="https://marcusgrass.github.io/pgwm03">here</a>.<br>
+All in all the binary becomes a lot smaller, most things are same-y in speed, but I did, after finding out how to parse
+the vDSO
+at runtime, manage to beat the standard library's <code>Instant::now()</code> by getting the current time in a bit less than 12% of
+the time, seeing that was really cool.</p>
+<p>If you want to check out the WM, that can be found <a href="https://github.com/MarcusGrass/pgwm">here</a>.<br>
+If you want to check out tiny-std, which you should by no means use because it's not at all safe,
+that's <a href="https://github.com/MarcusGrass/tiny-std/">here</a>.<br>
+As previously mentioned, there's a write-up on all of that <a href="https://marcusgrass.github.io/pgwm03">here</a>.</p>
+<h1>Up next</h1>
+<p>Thinking about some minimal terminal emulator using tiny-std, if I get the time.</p>
 </div>`;function render(location) {
 	if (location === Location.HOME.path) {
 		document.getElementById("menu")
@@ -516,11 +547,11 @@ class Navigation {
     navigate(location) {
         window.history.pushState({"pageTitle": location}, "", location);
         render(location);
-        self.location = location;
+        this.location = location;
     }
     init_nav() {
-        console.log("Init nav to" + self.location);
-        render(self.location);
+        console.log("Init nav to " + this.location);
+        render(this.location);
     }
 }
 let cur = window.location.pathname.split("/").pop();
