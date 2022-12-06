@@ -26,7 +26,7 @@ if I end up writing a lot of stuff here I'm going to have to look into better na
 repo <a href="https://github.com/MarcusGrass/marcusgrass.github.io/blob/main/LICENSE">here</a>.<br>
 The license for the styling is under that
 repo <a href="https://github.com/sindresorhus/github-markdown-css/blob/main/license">here</a></p>
-</div>`
+</div>`;
 const NAV_HTML = String.raw`<div class="markdown-body"><h1>Table of contents</h1>
 <p>Because I'm terrible at web-dev and unable to make a side menu scale properly,
 I made things easier for myself and made navigation happen through this md-page instead.</p>
@@ -41,11 +41,11 @@ I made things easier for myself and made navigation happen through this md-page 
 <li><a class="self-link" onclick=NAVIGATION.navigate("/pgwm03")>Pgwm03</a></li>
 <li><a class="self-link" onclick=NAVIGATION.navigate("/test")>Test</a></li>
 </ul>
-</div>`
+</div>`;
 const NOTFOUND_HTML = String.raw`<div class="markdown-body"><h1>Page not found</h1>
 <p>You seem to have navigated to a page that doesn't exist, sorry!</p>
 <p>You can go back in the navigation menu on the top left, or with <a class="self-link" onclick=NAVIGATION.navigate("/")>this link</a></p>
-</div>`
+</div>`;
 const META_HTML = String.raw`<div class="markdown-body"><h1>Writing these pages</h1>
 <p>I did a number of rewrites of this web application, some of which could probably be
 found in the repository's history.<br>
@@ -207,7 +207,7 @@ if a breaking change occurs, knowing how to fix it can become a lot more difficu
 to re-learn both how the library used to work internally, and the way it currently works, to preserve the old
 functionality.<br>
 <code>&#x3C;/rant></code></p>
-</div>`
+</div>`;
 const PGWM03_HTML = String.raw`<div class="markdown-body"><h1>PGWM 0.3, tiny-std, and xcb-parse</h1>
 <p>I recently made a substantial rewrite of my (now) pure rust x11 window manager and want to collect my thoughts on it
 somewhere.</p>
@@ -455,7 +455,7 @@ The experience of taking PGWM to <code>no_std</code> and no <code>libc</code> ha
 the same, a bit more efficient, a bit less stable.<br>
 I'll keep working out the bugs and API och <code>tiny-std</code>, plans to do a minimal terminal emulator are still in the back of
 my mind, we'll see if I can find the time.</p>
-</div>`
+</div>`;
 const TEST_HTML = String.raw`<div class="markdown-body"><h1>Here's a test write-up</h1>
 <p>I always test in prod.</p>
 <div class="highlight highlight-rust"><pre><span class="pl-k">fn</span> <span class="pl-en">main</span>() {
@@ -463,7 +463,7 @@ const TEST_HTML = String.raw`<div class="markdown-body"><h1>Here's a test write-
 }
 </pre></div>
 <p>Test some change here!</p>
-</div>`function render(location) {
+</div>`;function render(location) {
 	if (location === Location.HOME.path || location === "") {
 		document.getElementById("menu")
 			.innerHTML = create_nav_button("Table of contents", "/table-of-contents");

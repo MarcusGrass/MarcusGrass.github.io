@@ -220,7 +220,7 @@ fn format_page(name: &str, child: Child) -> Result<String, String> {
     let html_content = format!("<div class=\"markdown-body\">{}</div>", highlighted_html);
     let js_content = format!(
         "\n\
-        const {}_HTML = String.raw`{}`",
+        const {}_HTML = String.raw`{}`;",
         name.to_uppercase(),
         html_content
     );
@@ -279,15 +279,7 @@ fn copy_minified(ws: &Path) -> Result<(), String> {
             "css" => minifier::css::minify(&content)
                 .map_err(|e| format!("Failed to minify {path:?} {e}"))?
                 .to_string(),
-            "js" => {
-                // TODO: Js minify doesn't work with String.raw` followed by a keyword
-                // gotta create an issue about that and publish this as an example
-                let minified = minifier::js::minify(&content).to_string();
-                // Insert a newline to fix the mangle
-                minified
-                    .replace("`const", "`\nconst")
-                    .replace("`func", "`\nfunc")
-            }
+            "js" => minifier::js::minify(&content).to_string(),
             _ => {
                 return Err(format!(
                     "Only .js and .css files allowed in static dir {:?} found {path:?}",
