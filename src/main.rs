@@ -72,7 +72,7 @@ fn create_js() -> String {
         {}\
         \t}}\
     ",
-        create_inner_render(HOME.tag_name, Some((NAV_LABEL, NAV.path_name)))
+        create_inner_render(NOT_FOUND.tag_name, None)
     ));
     raw.push_str(r#"
 }
@@ -249,6 +249,9 @@ fn copy_minified(ws: &Path) -> Result<(), String> {
     let dest = dist.join("index.html");
     std::fs::write(&dest, &index)
         .map_err(|e| format!("Failed to write minified {:?} to {:?} {e}", src, dest))?;
+    let not_found = dist.join("404.html");
+    std::fs::write(&not_found, &index)
+        .map_err(|e| format!("Failed to write minified {:?} to {:?} {e}", src, not_found))?;
     let static_dir = ws.join("static");
     for entry in std::fs::read_dir(&static_dir)
         .map_err(|e| format!("Failed to read dir {:?} {e}", static_dir))?

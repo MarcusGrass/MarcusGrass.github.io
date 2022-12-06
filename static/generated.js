@@ -499,9 +499,9 @@ const TEST_HTML = String.raw`<div class="markdown-body"><h1>Here's a test write-
 			.innerHTML = TEST_HTML;
 	} else {
 		document.getElementById("menu")
-			.innerHTML = create_nav_button("Table of contents", "/table-of-contents");
+			.innerHTML = create_nav_button("Home", "/") + create_nav_button("Table of contents", "/table-of-contents");
 		document.getElementById("content")
-			.innerHTML = HOME_HTML;
+			.innerHTML = NOTFOUND_HTML;
 	}
 }
 function create_nav_button(label, link) {
