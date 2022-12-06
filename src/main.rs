@@ -96,6 +96,7 @@ class Navigation {
     }
 }
 let cur = window.location.pathname.split("/").pop();
+console.log("/" + cur, cur);
 let NAVIGATION = new Navigation("/" + cur);
     "#);
     raw
