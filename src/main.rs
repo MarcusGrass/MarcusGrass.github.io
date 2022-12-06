@@ -44,7 +44,7 @@ fn create_js() -> String {
     raw.push_str("function render(location) {\n");
     let _ = raw.write_fmt(format_args!(
         "\
-        \tif (location === Location.{}.path || location === \"\") {{\n\
+        \tif (location === Location.{}.path) {{\n\
         {}\
         \t}} else if (location === Location.{}.path) {{\n\
         {}\
@@ -72,7 +72,7 @@ fn create_js() -> String {
         {}\
         \t}}\
     ",
-        create_inner_render(NOT_FOUND.tag_name, None)
+        create_inner_render(HOME.tag_name, Some((NAV_LABEL, NAV.path_name)))
     ));
     raw.push_str(r#"
 }

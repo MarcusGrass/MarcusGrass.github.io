@@ -13,9 +13,11 @@ const HOME_HTML = String.raw`<div class="markdown-body"><h1>About</h1>
 <p>There's not supposed to be a web 1.0 vibe to it, but I'm horrible at front-end styling so here we are.<br>
 The site is constructed in <code>javascript</code> but
 as with all things in my free time I make things more complicated than they need to be.<br>
-There is a <code>Rust</code> runner that takes the md-files, generates html and javascript, and then minifies that.<br>
+There is a <code>Rust</code> runner that takes the md-files, generates html and javascript, and then minifies
+that.<br>
 The markdown styling is ripped from <a href="https://github.com/sindresorhus/github-markdown-css">this project</a>,
 it's GitHub's markdown CSS, I don't want to stray too far out of my comfort zone...</p>
+<p>The highlighting is done with the use of <a href="https://github.com/wooorm/starry-night">starry-night</a>.</p>
 <p>All page content except for some glue is just rendered markdown contained
 in <a href="https://github.com/MarcusGrass/marcusgrass.github.io">the repo</a>.</p>
 <h2>Content</h2>
@@ -25,7 +27,10 @@ if I end up writing a lot of stuff here I'm going to have to look into better na
 <p>The license for this pages code can be found in the
 repo <a href="https://github.com/MarcusGrass/marcusgrass.github.io/blob/main/LICENSE">here</a>.<br>
 The license for the styling is under that
-repo <a href="https://github.com/sindresorhus/github-markdown-css/blob/main/license">here</a></p>
+repo <a href="https://github.com/sindresorhus/github-markdown-css/blob/main/license">here</a>.<br>
+The license for starry night is for some reason kept in this 1MB file in their repo
+<a href="https://github.com/wooorm/starry-night/blob/c73aac7b8bff41ada86747f668dd932a791b851b/notice">here</a>
+(TLDR it's MIT/Apache2 licensed under MIT)</p>
 </div>`;
 const NAV_HTML = String.raw`<div class="markdown-body"><h1>Table of contents</h1>
 <p>Because I'm terrible at web-dev and unable to make a side menu scale properly,
@@ -220,19 +225,19 @@ show what they need on screen for their users.</p>
 frameworks a developer might encounter. In <code>Rust</code>,
 the cross-platform library <a href="https://github.com/rust-windowing/winit">winit</a> can be used for this purpose,
 and applications written in <code>Rust</code> like the terminal emulator <a href="https://github.com/alacritty/alacritty">Alacritty</a>
-uses winit.</p>
+uses <code>winit</code>.</p>
 <p>At the core of the Linux desktop experience lies the Window Manager, either alone or accompanied by a Desktop
 Enviroment (DE). The Window Manager makes decisions on how windows are displayed.</p>
 <h3>The concept of a Window</h3>
-<p>'Window' is a loose term often used to describe some surface that can be drawn to on screen.<br>
+<p><em>Window</em> is a loose term often used to describe some surface that can be drawn to on screen.<br>
 In X11, a window is a <code>u32</code> id that the <code>xorg-server</code> keeps information about. It has properties, such as a height and
 width, it can be visible or not visible, and it enables the developer to ask the server to subscribe to events.</p>
-<h3>WM inner workings and X11</h3>
+<h3>WM inner workings and X11 (no compositor)</h3>
 <p>X11 works by starting the <code>xorg-server</code>, the <code>xorg-server</code> takes care of collecting input
 from <a href="https://en.wikipedia.org/wiki/Human_interface_device">HIDs</a>
 like the keyboard and mouse, collecting information about device state,
-such as when a screen is connected and disconnected,
-and coordinates messages from running applications, including the Window Manager.<br>
+such as when a screen is connected or disconnected,
+and coordinates messages from running applications including the Window Manager.<br>
 This communication goes over a socket, TCP or Unix. The default is <code>/tmp/.X11-unix/X0</code> for a single-display desktop
 Linux environment.</p>
 <p>The details of the communication are specified in xml files in Xorg's gitlab
@@ -241,12 +246,12 @@ The repo contains language bindings, xml schemas that specify how an object pass
 to be recognized by the xorg-server.
 The name for the language bindings is XCB for 'X protocol C-language Binding'.<br>
 Having this kind of protocol means that a developer who can't or won't directly link to and use the <code>xlib</code> C-library
-can instead construct their own representations of those objects and send them over the socket.</p>
+can instead construct their own representations of those objects and send those over the socket.</p>
 <p>In PGWM a <code>Rust</code> language representation of these objects are used, containing serialization and deserialization methods
 that turn Rust structs into raw bytes that can be transmitted on the socket.</p>
-<p>If lunching PGWM through <a href="https://wiki.archlinux.org/title/xinit">xinit</a>, an xorg-server is started at the beginning
-of the script, if PGWM is launched inside that script it will try to become that server's Window Manager.</p>
-<p>When an application starts within the context of x11, a handshake takes place. The application asks for setup
+<p>If launching PGWM through <a href="https://wiki.archlinux.org/title/xinit">xinit</a>, an xorg-server is started at the beginning
+of that script, if PGWM is launched inside that script it will try to become that server's Window Manager.</p>
+<p>When an application starts within the context of X11, a handshake takes place. The application asks for setup
 information from the server, and if the server replies with a success the application can start interfacing
 with the server.<br>
 In a WM's case, it will request to set the <code>SubstructureRedirectMask</code> on the root X11 window.<br>
@@ -278,7 +283,7 @@ It was used to draw characters on the status bar.</p>
 of <a href="https://en.wikipedia.org/wiki/Fontconfig">Fontconfig</a> integration.
 Maybe you've encountered something like this <code>JetBrainsMono Nerd Font Mono:size=12:antialias=true</code>, it's
 an excerpt from my <code>~/.Xresources</code> file and configures the font for Xterm. Xterm uses fontconfig to figure out where
-that font is located on my machine. Removing XFT and fontconfig with it means that fonts have to specified by path,
+that font is located on my machine. Removing XFT and fontconfig with it, means that fonts have to specified by path,
 now this is necessary to find fonts: <code>/usr/share/fonts/JetBrains\ Mono\ Medium\ Nerd\ Font\ Complete\ Mono.ttf</code>, oof.
 I still haven't found a non <code>C</code> replacement for finding fonts without specifying an absolute path.</p>
 <p>One step in drawing a font is taking the font data and creating a vector of light intensities, this process is called
@@ -296,12 +301,14 @@ bitmaps rasterized by <code>fontdue</code> on top, into a shared memory segment,
 segment.
 It worked, but it took a lot of memory, increased CPU usage, and was slow.</p>
 <h3>Render</h3>
-<p>I finally went to look at XFT's code and found that it uses the <code>render</code> extension, an extension that can register byte
-representations as glyphs, and then draw those glyphs at specified locations, by glyph-id. This is the sane way to do
+<p>I finally went to look at XFT's code and found that it uses
+the <a href="https://gitlab.freedesktop.org/xorg/proto/xcbproto/-/blob/master/src/render.xml">render</a>
+extension, an extension that can register byte representations as glyphs, and then draw those glyphs at specified
+locations, by glyph-id. This is the sane way to do
 it. After implementing that, font rendering was again working, and the performance was good.</p>
 <h1>PGWM 0.3 how can I make this smaller and faster?</h1>
 <p>I wanted PGWM to be as resource efficient as possible, I decided to dig into the library that I used do serialization
-and deserialization of <code>Rust</code> structs that were to go over the socket to the xorg-server.</p>
+and deserialization of <code>Rust</code> structs that were to go over the socket to the <code>xorg-server</code>.</p>
 <p>The library I was using was <a href="https://github.com/psychon/x11rb">X11rb</a> an excellent safe and performant library for doing
 just that.
 However, I was taking optimization to a ridiculous extent, so I decided to make that library optimized for my specific
@@ -309,10 +316,8 @@ use case.</p>
 <h2>PGWM runs single threaded</h2>
 <p>X11rb can handle multithreading, making the execution path for single threaded applications longer than necessary.<br>
 I first rewrote the connection logic from interior mutability (the connection handles synchronization) to exterior
-mutability
-(user handles synchronization, by for example wrapping it in an <code>Arc&#x3C;RwLock&#x3C;Connection>></code>).<br>
-This meant a latency
-decrease of about 5%, which was pretty good. However, it did mean
+mutability (user handles synchronization, by for example wrapping it in an <code>Arc&#x3C;RwLock&#x3C;Connection>></code>).<br>
+This meant a latency decrease of about 5%, which was pretty good. However, it did mean
 that <a href="https://en.wikipedia.org/wiki/Resource_acquisition_is_initialization">RAII</a>
 no longer applied and the risk of memory leaks went up.
 I set the WM to panic on leaks in debug and cleaned them up where I found them to handle that.</p>
@@ -322,7 +327,7 @@ This means a lot of allocations. Instead, I created a connection which holds an 
 serialized directly into it, that buffer is then flushed over the socket. Meaning no allocations are necessary during
 serialization.</p>
 <p>The main drawback of that method is management of that buffer. If it's growable then the largest unflushed batch
-will take up memory for the user-application's runtime, or shrink-logic needs to be inserted after each flush.
+will take up memory for the WM's runtime, or shrink-logic needs to be inserted after each flush.
 If the buffer isn't growable, some messages might not fit depending on how the
 buffer is proportioned. It's pretty painful in edge-cases. I chose to have a fixed-size buffer of 64kb.</p>
 <p>At this point I realized that the code generation was hard to understand and needed a lot of changes to support my
@@ -336,24 +341,24 @@ code generator that I could work with.<br>
 A few more weeks followed and I had finally generated a <code>no_std</code> fairly optimized library for interfacing with <code>X11</code>
 over socket, mostly by looking at how x11rb does it.</p>
 <h3>Extreme yak-shaving, pt 2, no libc allowed</h3>
-<p>In <code>Rust</code>, <code>libc</code> is the most common way that the standard library interfaces with the OS, with some direct syscalls
-where necessary.
+<p>In <code>Rust</code>, <code>libc</code> is the most common way that the standard library interfaces with the OS, with some direct
+<a href="https://en.wikipedia.org/wiki/System_call">syscalls</a> where necessary.
 There are many good reasons for using <code>libc</code>, even when not building cross-platform/cross-architecture libraries,
 I wanted something pure <code>Rust</code>, so that went out the window.</p>
 <h4>Libc</h4>
 <p><code>libc</code> does a vast amount of things, on Linux there are two implementations that dominate, <code>glibc</code> and <code>musl</code>.
 I won't go into the details of the differences between them, but simplified, they are C-libraries that make your C-code
-run on Linux.<br>
+run as you expect on Linux.<br>
 As libraries they expose methods to interface with the OS, for example reading or writing to a file,
 or connecting to a socket.<br>
 Some functions are essentially just a proxies for <code>syscalls</code> but some do more things behind the scenes, like
 synchronization of shared application resources such as access to the environment pointer.</p>
 <h3>Removing the std-library functions and replacing them with syscalls</h3>
 <p>I decided to set PGWM to <code>!#[no_std]</code> and see what compiled. Many things in <code>std::*</code> are just re-exports from <code>core::*</code>
-and were easily replaced. For other things like talking to a socket I used raw syscalls through the
+and were easily replaced. For other things like talking to a socket I used raw <code>syscalls</code> through the
 excellent <a href="https://github.com/japaric/syscall.rs">syscall crate</a>
 and some glue-code to approximate what <code>libc</code> does. It was a bit messy,
-but not too much work replacing it, PGWM is now 100% not cross-platform.</p>
+but not too much work replacing it, PGWM is now 100% not cross-platform, although it wasn't really before either...</p>
 <h3>No allocator</h3>
 <p>Since the standard library provides the allocator I had to find a new one, I decided to
 use <a href="https://github.com/alexcrichton/dlmalloc-rs">dlmalloc</a>,
@@ -370,7 +375,8 @@ it works <code>no_std</code>, it was a fairly simple change.</p>
 <code>time</code> was easy, just some <code>Cargo.toml</code> magic that could easily be upstreamed.<br>
 <code>toml</code> was a bit trickier, the solution was ugly and I decided not to upstream it.<br>
 <code>dlmalloc-rs</code> was even harder, it used the pthread-api to make the allocator synchronize, and implementing that
-was beyond even my yak-shaving. Since PGWM is single threaded anyway I left it as-is.<br>
+was beyond even my yak-shaving. Since PGWM is single threaded anyway I left it as-is and <code>unsafe impl</code>'d
+<code>Send</code> and <code>Sync</code>.<br>
 <code>smallmap</code> fairly simple, upstreaming in progress.</p>
 <h3>The ghost of libc, time for nightly</h3>
 <p>With no traces of <code>libc</code> I try to compile the WM. It can't start, it doesn't know how to start.<br>
@@ -409,16 +415,17 @@ I'm unsure of the best way to handle this, perhaps by doing some libgen straight
 into <code>tiny-std</code>. <a href="https://fasterthanli.me/series/making-our-own-executable-packer/part-12">Fasterthanli.me</a>
 helped with the args, but for the rest I had to go to the <a href="https://git.musl-libc.org/cgit/musl">musl source</a>.<br>
 When an application starts on Linux, the first 8 bytes of the stack contains <code>argc</code>, the number of input arguments.
-Following that are the null-terminated strings of the arguments, then a null pointer, then comes a pointer to the
-environment variables.<br>
+Following that are the null-terminated strings of the arguments (<code>argv</code>), then a null pointer,
+then comes a pointer to the environment variables.<br>
 <code>musl</code> then puts that pointer into a global mutable variable, and that's the environment.<br>
 I buckle under and do the same, I see a world where arguments and environment are passed to main, and it's the
-application's job, not the library, to decide to handle it in a thread-safe way.<br>
+application's job, not the library, to decide to handle it in a thread-safe way
+(although you can use <code>env_p</code> as an argument to <code>main</code> in <code>C</code>).<br>
 Being no better than my predecessors, I store the environment pointer in a static variable, things like spawning
 processes becomes a lot more simple that way, <code>C</code> owns the world, we just live in it.</p>
-<h3>VDSO (virtual dynamic shared object), what there's more on the stack?</h3>
+<h3>vDSO (virtual dynamic shared object), what there's more on the stack?</h3>
 <p>Through some coincidence when trying to make sure all the processes that I spawn don't become zombies I encounter
-the <a href="https://en.wikipedia.org/wiki/VDSO">VDSO</a>.<br>
+the <a href="https://en.wikipedia.org/wiki/VDSO">vDSO</a>.<br>
 <code>ldd</code> has whispered the words, but I never looked it up.</p>
 <div class="highlight highlight-shell"><pre>[gramar@grarch marcusgrass.github.io]$ ldd <span class="pl-s"><span class="pl-pds">$(</span>which cat<span class="pl-pds">)</span></span>
         linux-vdso.so.1 (0x00007ffc0f59c000)
@@ -432,11 +439,12 @@ implementing, I could smell the nanoseconds.</p>
 <p>To find out where the VDSO is mapped into memory for an application, the application needs to inspect the
 <a href="https://man7.org/linux/man-pages/man3/getauxval.3.html">AUX values</a> at runtime.
 After the environment variable pointer comes another null pointer, following that are the <code>AUX</code> values.
-The <code>AUX</code> values are key-value pairs of information sent to the process. To be perfectly honest I'm unsure about their
-collective purpose. Among them are 16 random bytes, the <code>pid</code> of the process, the <code>gid</code>, and about two dozen more.<br>
+The <code>AUX</code> values are key-value(like) pairs of information sent to the process.
+Among them are 16 random bytes, the <code>pid</code> of the process, the <code>gid</code>, and about two dozen more entries of
+possibly useful values.<br>
 I write some more code into the entrypoint to save these values.</p>
 <h3>A memory mapped elf-file</h3>
-<p>Among the aux-values is <code>AT_SYSINFO_EHDR</code>, a pointer to the start of the <code>VDSO</code> which is a full
+<p>Among the aux-values is <code>AT_SYSINFO_EHDR</code>, a pointer to the start of the <code>vDSO</code> which is a full
 <a href="https://en.wikipedia.org/wiki/Executable_and_Linkable_Format">ELF-file</a> mapped into the process' memory.<br>
 I know that in this file is a function pointer for the <code>clock_gettime</code> function through the
 <a href="https://man7.org/linux/man-pages/man7/vdso.7.html">Linux vDSO docs</a>. I had benchmarked <code>tiny-std</code>'s
@@ -445,7 +453,7 @@ I needed to find this function pointer.</p>
 <p>After reading more Linux documentation, and ELF-documentation, and Linux-ELF-documentation,
 I managed to write some code that parses the ELF-file to find the address of the function.
 Of course that goes into another global variable, you know, <code>C</code>-world and all that.</p>
-<p>I created a feature that does the VDSO parsing, and if <code>clock_gettime</code> is found, uses that instead of the syscall.
+<p>I created a feature that does the vDSO parsing, and if <code>clock_gettime</code> is found, uses that instead of the syscall.
 This increased the performance if <code>Instant::now()</code> from <code>~std * 7</code> to <code>&#x3C; std * 0.9</code>. In other words, it now outperforms
 standard by taking around 12% less time to get the current time from the system.</p>
 <h1>Conclusion</h1>
@@ -464,7 +472,7 @@ const TEST_HTML = String.raw`<div class="markdown-body"><h1>Here's a test write-
 </pre></div>
 <p>Test some change here!</p>
 </div>`;function render(location) {
-	if (location === Location.HOME.path || location === "") {
+	if (location === Location.HOME.path) {
 		document.getElementById("menu")
 			.innerHTML = create_nav_button("Table of contents", "/table-of-contents");
 		document.getElementById("content")
@@ -491,9 +499,9 @@ const TEST_HTML = String.raw`<div class="markdown-body"><h1>Here's a test write-
 			.innerHTML = TEST_HTML;
 	} else {
 		document.getElementById("menu")
-			.innerHTML = create_nav_button("Home", "/") + create_nav_button("Table of contents", "/table-of-contents");
+			.innerHTML = create_nav_button("Table of contents", "/table-of-contents");
 		document.getElementById("content")
-			.innerHTML = NOTFOUND_HTML;
+			.innerHTML = HOME_HTML;
 	}
 }
 function create_nav_button(label, link) {
