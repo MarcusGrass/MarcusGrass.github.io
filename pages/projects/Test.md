@@ -4,8 +4,7 @@ I always test in prod.
 
 ```rust
 fn main() {
-    panic!("I wish this was highlighted, but it's been painful \
-    getting that to work without exploding the site's size...");
+    panic!("Finally highlighting works");
 }
 ```
 

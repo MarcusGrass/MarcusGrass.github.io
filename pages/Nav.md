@@ -10,5 +10,6 @@ I made things easier for myself and made navigation happen through this md-page 
 
 ## Projects
 
+- [This page](/meta)
 - [Pgwm03](/pgwm03)
 - [Test](/test)

@@ -1,4 +1,3 @@
 FROM rust:1-slim-buster
-RUN apt-get update && apt-get install -y git
-RUN cargo install --locked trunk
-RUN rustup target add wasm32-unknown-unknown
+RUN apt-get update && apt-get install -y git &&\
+    apt-get install -y npm

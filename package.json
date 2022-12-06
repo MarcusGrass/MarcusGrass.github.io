@@ -1,0 +1,31 @@
+{
+  "name": "marcus.grass.github.io",
+  "version": "1.0.0",
+  "description": "html highligting converter script",
+  "main": "highlight_html.js",
+  "type": "module",
+  "scripts": {
+    "generate": "node highlight_html.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MarcusGrass/marcusgrass.github.io.git"
+  },
+  "author": "Marcus Grass",
+  "license": "MPL-2.0",
+  "bugs": {
+    "url": "https://github.com/MarcusGrass/marcusgrass.github.io/issues"
+  },
+  "homepage": "https://github.com/MarcusGrass/marcusgrass.github.io#readme",
+  "dependencies": {
+    "@wooorm/starry-night": "1.4.2",
+    "hast-util-to-string": "2.0.0",
+    "rehype": "12.0.1",
+    "rehype-stringify": "9.0.3",
+    "remark-parse": "10.0.1",
+    "remark-rehype": "10.1.0",
+    "unified": "10.1.2",
+    "unist-util-visit": "4.1.1"
+  }
+}
