@@ -47,9 +47,9 @@ const NOTFOUND_HTML = String.raw`<div class="markdown-body"><h1>Page not found</
 <p>You can go back in the navigation menu on the top left, or with <a class="self-link" onclick=NAVIGATION.navigate("/")>this link</a></p>
 </div>`
 const META_HTML = String.raw`<div class="markdown-body"><h1>Writing these pages</h1>
-<p>I did a number of rewrites of this page, some which could probably be
-found in this repository history.<br>
-The goal has changed over time but as with all things, I wanted to create something that's as small as possible,
+<p>I did a number of rewrites of this web application, some of which could probably be
+found in the repository's history.<br>
+The goal has changed over time, but as with all things I wanted to create something that's as small as possible,
 and as fast as possible, taken to a ridiculous and counterproductive extent.</p>
 <h2>Rust for frontend</h2>
 <p>Rust can target <a href="https://en.wikipedia.org/wiki/WebAssembly">WebAssembly</a> through its target
@@ -59,36 +59,38 @@ to be served through a browser using <code>Rust</code>.</p>
 <p>After thinking that I should start writing things down more, I decided to make a blog to collect my thoughts.<br>
 Since I'm a disaster at front-end styling I decided that if I could get something to format markdown, that's good
 enough.<br>
-I could have just kept them as .md files in a git-repo, and that would have been the reasonable thing to do,
+I could have just kept them as <code>.md</code> files in a git-repo, and that would have been the reasonable thing to do,
 but the concept of a dedicated page for it spoke to me, with GitHub's free hosting I started looking for alternatives
 for a web framework.</p>
 <h2>SPA</h2>
 <p>An SPA (<a href="https://en.wikipedia.org/wiki/Single-page_application">Single Page Application</a>), is a web application where
-the user doesn't have to follow a link and load a new page from the server to navigate to different pages on the
-application. It dynamically renders html based on path. This saves the user an http round trip when switching
-pages of the application, causing the application to feel more responsive.</p>
+the user doesn't have to follow a link and load a new page from the server to navigate to different pages of the
+application. It dynamically injects html based on path. This saves the user an http round trip when switching
+pages within the application, causing the application to feel more responsive.</p>
 <p>I've worked with SPAs a bit in the past with the <a href="https://angular.io/">Angular</a> framework, and I wanted to see if I
-could implement that using Rust.</p>
+could implement an SPA using Rust.</p>
 <h2>Yew</h2>
 <p>I didn't search for long before finding <a href="https://yew.rs/">yew</a>, it's a framework for developing front-end applications
 in <code>Rust</code>. It looked pretty good so I started up.</p>
-<p>I like how <code>Yew</code> does things, you construct <code>Components</code> that pass messages and react to them, changing their state.
-Although, I have a personal beef with <code>macros</code> and especially since <code>0.20</code> <code>Yew</code> uses them a lot.</p>
+<p>I like how <code>Yew</code> does things, you construct <code>Components</code> that pass messages and react to them, changing their state
+and maybe causing a rerender.
+Although, I have a personal beef with <code>macros</code> and especially since <code>0.20</code> <code>Yew</code> uses them a lot,
+but we'll get back to that.</p>
 <p>My first shot was using <a href="https://github.com/raphlinus/pulldown-cmark">pulldown-cmark</a> directly from the <code>Component</code>.<br>
-I included the <code>.md</code>-files as <code>include_str!(...)</code> and then converted those to html withing the component at view-time.</p>
+I included the <code>.md</code>-files as <code>include_str!(...)</code> and then converted those to html within the component at view-time.</p>
 <h3>How the page worked</h3>
 <p>The page output is built using <a href="https://trunkrs.dev/">Trunk</a> a <code>wasm</code> web application bundler.</p>
 <p><code>trunk</code> takes my wasm and assets, generates some glue javascript to serve it, and moves it into a <code>dist</code> directory along
-with my <code>index.html</code>. From the <code>dist</code> directory, my page can be loaded.</p>
+with my <code>index.html</code>. From the <code>dist</code> directory, the web application can be loaded.</p>
 <p>The code had included my <code>.md</code>-files in the binary, a <code>const String</code> inserted into the <code>wasm</code>. When a
 page was to be loaded through navigation, my <code>component</code> checked the path of the <code>url</code>, if for example it was
-<code>/</code> it would select the hardcoded string from the markdown of <code>Home.md</code>, convert that to <code>html</code> and then insert
+<code>/</code> it would select the hardcoded string from the markdown of <code>Home.md</code>, convert that to <code>html</code> and then inject
 that html into the page.</p>
 <h3>Convert at compile time</h3>
 <p>While not necessarily problematic, this seemed unnecessary, since the <code>.md</code>-content doesn't change and is just
 going to be converted, I might as well only do that once.
-The alternatives for that is at compile time or at page load time, opposed to what I was currently doing, which I guess
-would be called <code>render time</code> (in other words, every time content was rendered).</p>
+The alternatives for that is at compile time or at application load time, opposed to what I was currently doing,
+which I guess would be called <code>render time</code> or <code>view-time</code> (in other words, every time content was to be injected).</p>
 <p>I decided to make build-scripts which takes my <code>.md</code>-pages, and converts them to <code>html</code>, then my application
 could load that <code>const String</code> instead of the old one, skipping the conversion step and the added binary dependency of
 <a href="https://github.com/raphlinus/pulldown-cmark">pulldown-cmark</a>.</p>
@@ -98,7 +100,7 @@ could load that <code>const String</code> instead of the old one, skipping the c
 As someone who is artistically challenged I needed to find some off-the-shelf styling to apply.</p>
 <p>I thought GitHub's <code>css</code> for their markdown rendering looks nice and wondered if I could find the source for it,
 after just a bit of searching I found <a href="https://github.com/sindresorhus/github-markdown-css">github-markdown-css</a>, where
-a generator for that <code>css</code> as well as already generated copies of it. I added that too my page.</p>
+a generator for that <code>css</code>, as well as already generated copies of it. I added that too my page.</p>
 <h3>Code highlighting</h3>
 <p>Code highlighting was difficult, there are a few alternatives for highlighting.<br>
 If I understood it correctly, GitHub uses something similar to <a href="https://github.com/wooorm/starry-night">starry-nigth</a>.<br>
@@ -111,23 +113,24 @@ This turned out to not be that easy the way I was doing things.<br>
 Since I was rendering the body dynamically, previously highlighted elements would be de-highlighted on navigation,
 since the <code>highlightAll()</code> function had already been called. While I'm sure that you can call js-functions from <code>Yew</code>,
 finding how to do that in the documentation is difficult. Knowing when the call them is difficult as well,
-as many comprehensive frameworks, they work as black boxes sometimes, while it's easy to look at page-html with
+as many comprehensive frameworks, they work as black boxes sometimes. While it's easy to look at page-html with
 <code>javascript</code> and understand what's happening and when, it's difficult to view corresponding <code>Rust</code> code and know when
 an extern <code>javascript</code> function would be called, if I could figure out how to insert such a call in the <code>component</code>.<br>
 I settled for not having highlighting and continued building.</p>
 <h3>Navigation</h3>
 <p>I wanted a nav-bar, some <a href="https://en.wikipedia.org/wiki/Hamburger_button">hamburger menu</a> which would unfold and
-giev the user access to navigation around the page. Constructing that with my knowledge of css was a disaster.<br>
+give the user access to navigation around the page. Constructing that with my knowledge of css was a disaster.<br>
 It never scaled well, it was difficult putting it in the correct place, and eventually I just gave up
 and created a navigation page <code>.md</code>-style, like all other pages in the application.<br>
 I kept a menu button for going back to home, or to the navigation page, depending on the current page.</p>
-<p>An issue with this is that, links in <code>.md</code>-file, when converted to <code>html</code> becomes regular <code>&#x3C;a href=".."</code> links,
-which will cause a new page-load is followed. My internal navigation was done using <code>Yew</code> callbacks, swapping out
+<p>An issue with this is that links in an <code>.md</code>-file, when converted to <code>html</code>, become regular <code>&#x3C;a href=".."</code> links,
+which will cause a new page-load. My internal navigation was done using <code>Yew</code> callbacks, swapping out
 page content on navigation, that meant I'd have to replace those <code>href</code> links with <code>Yew</code> templating.
-I decided to make my build script more complex, instead of serving raw converted <code>html</code>, I would create stub
+I decided to make my build script more complex, instead of serving raw converted <code>html</code>, I would generate small
 rust-files which would convert the <code>html</code> into <code>Yew</code>'s <code>html!</code> macro. This was ugly in practice, html that looked like
 this</p>
-<div class="highlight highlight-text-html-basic"><pre>&#x3C;<span class="pl-ent">div</span>>
+<div class="highlight highlight-text-html-basic"><pre>
+&#x3C;<span class="pl-ent">div</span>>
     Content here
 &#x3C;/<span class="pl-ent">div</span>>
 </pre></div>
@@ -154,15 +157,14 @@ adding the class <code>self-link</code> to the links that were replaced.<br>
 Some complexity was left out, such as the <code>scope</code> being moved into the function, so I had to generate a bunch of
 <code>scope_n</code> at the top of the generated function from which the <code>html</code> was returned.</p>
 <p>In the end it worked, an internal link was replaced by a navigation call, and navigation worked from my <code>.md</code>
-navigation
-page.</p>
+navigation page.</p>
 <p>The page was exactly how I wanted.</p>
 <h3>Yew page retrospective</h3>
 <p>Looking at only the <code>wasm</code> for this fairly minimal page, it was more than <code>400K</code>. To make the page work
 I had to build a complex build script that generated <code>Rust</code> code that was valid with the <code>Yew</code> framework.<br>
 And to be honest, since bumping <code>Yew</code> from <code>0.19</code> to <code>0.20</code> during this process, seeing a turn towards even heavier
 use of macros for functionality. I didn't see this as maintainable even in the medium term.<br>
-I had a big slow page which probably wouldn't be maintainable.</p>
+I had a big slow page which probably wouldn't be maintainable where highlighting was tricky to integrate.</p>
 <h2>RIIJS</h2>
 <p>I decided to rewrite the page in javascript, or rather generate javascript from a <code>Rust</code> build script and skip
 <code>Yew</code> entirely.<br>
@@ -180,9 +182,9 @@ end my page was equally small as with <code>prism</code>, and doing slightly les
 <h2>In defense of Yew</h2>
 <p><code>Yew</code> is not a bad framework, and that's not the point of this post. The point is rather the importance of
 using the best tool for the job. <code>wasm</code> is not necessarily faster than <code>javascript</code> on the web, and if not doing
-heavy calculation which can be offloaded to the <code>wasm</code>, the complexity and size of a framework that utilizes it may not
+heavy operations which can be offloaded to the <code>wasm</code>, the complexity and size of a framework that utilizes it may not
 be worth it. This page is just a simple collection of html with some highlighting, anything dynamic on the page
-is almost entirely in the scope of <code>DOM</code> manipulation, which <code>wasm</code> just can't do at the moment.</p>
+is almost entirely in the scope of <code>DOM</code> manipulation, which <code>wasm</code> just can't handle at the moment.</p>
 <h2>CI</h2>
 <p>Lastly, I wanted my page to be rebuilt and published in CI, and I wanted to not have to check in the <code>dist</code> folder,
 so I created a pretty gnarly <code>bash</code>-script. The complexity isn't the bad part, the bad part is the

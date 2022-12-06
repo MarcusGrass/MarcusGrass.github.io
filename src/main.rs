@@ -1,4 +1,5 @@
 use std::fmt::Write;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 
@@ -232,8 +233,11 @@ fn to_nav_link_fn(location: &str) -> String {
 
 fn copy_minified(ws: &Path) -> Result<(), String> {
     let dist = ws.join("dist");
-    std::fs::remove_dir_all(&dist)
-        .map_err(|e| format!("Failed to clean out dist directory {dist:?} {e}"))?;
+    match std::fs::remove_dir_all(&dist) {
+        Ok(_) => {}
+        Err(ref e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("Failed to clean out dist directory {dist:?} {e}")),
+    }
     std::fs::create_dir_all(&dist)
         .map_err(|e| format!("Failed to create dist dir {dist:?} {e}"))?;
     let dist_static = dist.join("static");
