@@ -86,12 +86,12 @@ class Navigation {
     }
 
     navigate(location) {
-        if (location !== this.location) {
-            window.history.pushState({"pageTitle": location}, "", location);
-            render(location);
-        }
+        window.history.pushState({"pageTitle": location}, "", location);
+        render(location);
+        self.location = location;
     }
     init_nav() {
+        console.log("Init nav to" + self.location);
         render(self.location);
     }
 }
