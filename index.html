@@ -14,6 +14,10 @@
 </div>
 <div id="content">
 </div>
-<script>NAVIGATION.init_nav();</script>
+<script>
+    let cur = window.location.pathname.split("/").pop();
+    console.log("navigation to: /" + cur, cur);
+    page_navigate(cur);
+</script>
 </body>
 </html>

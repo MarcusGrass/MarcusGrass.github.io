@@ -77,27 +77,13 @@ fn create_js() -> String {
     raw.push_str(r#"
 }
 function create_nav_button(label, link) {
-    return "<button class=\"menu-item\" onclick=NAVIGATION.navigate(\"" + link + "\")>" + label + "</button>";
+    return "<button class=\"menu-item\" onclick=page_navigate(\"" + link + "\")>" + label + "</button>";
 }
 
-class Navigation {
-    constructor(location) {
-        this.location = location;
-    }
-
-    navigate(location) {
+function page_navigate(location) {
         window.history.pushState({"pageTitle": location}, "", location);
         render(location);
-        this.location = location;
-    }
-    init_nav() {
-        console.log("Init nav to " + this.location);
-        render(this.location);
-    }
 }
-let cur = window.location.pathname.split("/").pop();
-console.log("/" + cur, cur);
-let NAVIGATION = new Navigation("/" + cur);
     "#);
     raw
 }
