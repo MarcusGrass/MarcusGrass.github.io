@@ -524,5 +524,5 @@ class Navigation {
     }
 }
 let cur = window.location.pathname.split("/").pop();
-let NAVIGATION = new Navigation(cur);
+let NAVIGATION = new Navigation("/" + cur);
     
