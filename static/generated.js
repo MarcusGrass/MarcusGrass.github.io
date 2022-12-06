@@ -37,19 +37,19 @@ const NAV_HTML = String.raw`<div class="markdown-body"><h1>Table of contents</h1
 I made things easier for myself and made navigation happen through this md-page instead.</p>
 <h2>Top level navigation</h2>
 <ul>
-<li><a class="self-link" onclick=NAVIGATION.navigate("/")>Home(also top left on this page)</a></li>
-<li><a class="self-link" onclick=NAVIGATION.navigate("/table-of-contents")>Table of contents(here, nothing will happen)</a></li>
+<li><a class="self-link" onclick=page_navigate("/")>Home(also top left on this page)</a></li>
+<li><a class="self-link" onclick=page_navigate("/table-of-contents")>Table of contents(here, nothing will happen)</a></li>
 </ul>
 <h2>Projects</h2>
 <ul>
-<li><a class="self-link" onclick=NAVIGATION.navigate("/meta")>This page</a></li>
-<li><a class="self-link" onclick=NAVIGATION.navigate("/pgwm03")>Pgwm03</a></li>
-<li><a class="self-link" onclick=NAVIGATION.navigate("/test")>Test</a></li>
+<li><a class="self-link" onclick=page_navigate("/meta")>This page</a></li>
+<li><a class="self-link" onclick=page_navigate("/pgwm03")>Pgwm03</a></li>
+<li><a class="self-link" onclick=page_navigate("/test")>Test</a></li>
 </ul>
 </div>`;
 const NOTFOUND_HTML = String.raw`<div class="markdown-body"><h1>Page not found</h1>
 <p>You seem to have navigated to a page that doesn't exist, sorry!</p>
-<p>You can go back in the navigation menu on the top left, or with <a class="self-link" onclick=NAVIGATION.navigate("/")>this link</a></p>
+<p>You can go back in the navigation menu on the top left, or with <a class="self-link" onclick=page_navigate("/")>this link</a></p>
 </div>`;
 const META_HTML = String.raw`<div class="markdown-body"><h1>Writing these pages</h1>
 <p>I did a number of rewrites of this web application, some of which could probably be

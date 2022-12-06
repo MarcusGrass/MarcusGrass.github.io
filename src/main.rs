@@ -215,7 +215,7 @@ fn format_page(name: &str, child: Child) -> Result<String, String> {
 }
 
 fn to_nav_link_fn(location: &str) -> String {
-    format!("class=\"self-link\" onclick=NAVIGATION.navigate(\"{location}\")")
+    format!("class=\"self-link\" onclick=page_navigate(\"{location}\")")
 }
 
 fn copy_minified(ws: &Path) -> Result<(), String> {
