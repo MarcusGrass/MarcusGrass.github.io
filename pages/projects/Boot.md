@@ -2,7 +2,7 @@
 I recently dug into a previously unfamiliar part of Linux, the bootloader.  
 
 ## Preamble, Security keys
-I got some [Yubikeys](https://www.yubico.com/) lately. Yubikeys are security keys, which essentially is a fancy 
+I got some [Yubikeys](https://www.yubico.com/) recently. Yubikeys are security keys, which essentially is a fancy 
 name for a drive (USB in this case) created to store secrets securely.  
 
 Some secrets that are loaded into the key cannot escape at all, they can even be created on the key, never having seen 
@@ -13,7 +13,7 @@ in the case of Linux disk encryption.
 
 I did some programming against the Yubikeys, I published a small runner to sign data with a Yubikey [here](https://github.com/MarcusGrass/yk-verify)
 but got a bit discouraged by the need for [pcscd](https://pcsclite.apdu.fr/) to connect.  
-Later I managed to do a pure rust integration against the Linux usb driver, and will publish that pretty soon.  
+Later I managed to do a pure rust integration against the Linux usb interface, and will publish that pretty soon.  
 
 Then I started thinking about if I could integrate this into my boot process, I got derailed.  
 
@@ -23,18 +23,18 @@ worked well, but it does feel old.
 
 When I ran `grub-mkconfig -o ...`, updating my boot configuration, and ran into
 [this](https://www.reddit.com/r/EndeavourOS/comments/wygfds/full_transparency_on_the_grub_issue/) issue I figured it 
-was time to look over the alternatives. After burning another ISO to get back into my system.
+was time to survey for other options. After burning another ISO to get back into my system.
 
 ## Bootloader alternatives
 I was looking into alternatives, finding [efi stub](https://wiki.archlinux.org/title/EFISTUB) to be the most appealing option, 
 if the kernel can boot itself, why even have a bootloader?  
 
-With gentoo, integrating that was fairly easy assuming no disk encryption.  
+With gentoo, integrating that was fairly easy assuming no disk encryption.
 
-Before getting into this, a few paragraphs about the Linux boots process may be appropriate
+Before getting into this, a few paragraphs about the Linux boots process may be appropriate.
 
 ## Boot in short
-The boot process, in my opinion, starts on the motherboard and ends when the kernel hands over execution to `/sbin/init`.  
+The boot process, in my opinion, starts on the motherboard firmware and ends when the kernel hands over execution to `/sbin/init`.  
 
 ### UEFI
 The motherboard powers on and starts running UEFI firmware (I'm pretending bios don't exist because I'm not stuck in the past).  
@@ -52,7 +52,7 @@ The kernel process starts, initializing the memory it needs, starting tasks, and
 
 ### Initramfs
 When the kernel has performed its initialization, early userspace starts in the initramfs.  
-[Initramfs](https://en.wikipedia.org/wiki/Initial_ramdisk) also called early userspace, is the first place a Linux user 
+[Initramfs](https://en.wikipedia.org/wiki/Initial_ramdisk), also called early userspace, is the first place a Linux user 
 is likely to spread their bash-spaghetti in the boot-process.  
 
 The initramfs is a ram-contained (in-memory) file-system, [it can be baked into the kernel](https://cateee.net/lkddb/web-lkddb/INITRAMFS_SOURCE.html), 
@@ -62,7 +62,7 @@ enough for `init` to take over execution. Here is where disk-decryption happens 
 The Initramfs-stage ends by handing over execution to `init`:
 
 `exec switch_root <root-partition> <init>`, an example could be `exec switch_root /mnt/root /sbin/init`,
-by convention, `init` is usually `/sbin/init`.  
+by convention, `init` is usually found at `/sbin/init`.  
 
 The initramfs prepares user-space, while `init` "starts" it, e.g. processes, such as [dhcpcd](https://wiki.archlinux.org/title/dhcpcd), 
 are taken care of by `init`.  
@@ -72,7 +72,7 @@ Init is the first userspace process to be started, the parent to all other proce
 the kernel panics.
 Init could be any executable, like [Bash](https://en.wikipedia.org/wiki/Bash_(Unix_shell)).  
 
-In an example system where bash is init, the user will be dropped into the command-line at the destination that the 
+In an example system where bash is init, the user will be dropped into the command-line, in a bash shell, at the destination that the 
 initramfs specified in `switch_root`. From a common user's perspective this is barely a functional system, it has no internet, 
 it will likely not have connections to a lot of peripheral devices, and there is no login management.  
 
@@ -85,10 +85,10 @@ and start login management.
 
 ## DIY initramfs
 I wanted basic security, this means encrypted disks, if I lose my computer, or it gets stolen, I can be fairly sure that 
-they won't get access to my data without considerable effort.  
+the culprits won't get access to my data without considerable effort.  
 Looking back up over the steps, it means that I need to create an initramfs, so that my disks can be decrypted on boot. 
 There are tools to create an initramfs, [dracut](https://en.wikipedia.org/wiki/Dracut_(software)) being 
-one example,[mkinitcpio](https://wiki.archlinux.org/title/Mkinitcpio) that Arch Linux uses being another.  
+one example, [mkinitcpio](https://wiki.archlinux.org/title/Mkinitcpio) that Arch Linux uses is another.  
 
 Taking things to the most absurd level, I figured I'd write my own initramfs instead.  
 
@@ -190,7 +190,7 @@ Finally, we can execute the init script at boot time, and immediately panic agai
 
 ### Udev
 There are multiple ways to address disks, we could for example, copy the disk we need in the initramfs as it shows up 
-under /dev, `cp -a /dev/sda2 dev`.  But the regular disk naming convention isn't static, `/dev/sda` might be tomorrow's 
+under `/dev`, `cp -a /dev/sda2 dev`.  But the regular disk naming convention isn't static, `/dev/sda` might be tomorrow's 
 `/dev/sdb`. Causing an un-bootable system, ideally we would specify it by uuid.  
 
 Udev is a tool that finds devices, listens to device events, and a bit more. What we need it for, is to populate 
