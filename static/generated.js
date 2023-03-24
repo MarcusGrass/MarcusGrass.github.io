@@ -4,6 +4,7 @@ const Location = Object.freeze({
 	NOTFOUND: {"path": "/not-found", "name": "NotFound"},
 	META: {"path": "/meta", "name": "Meta"},
 	PGWM03: {"path": "/pgwm03", "name": "Pgwm03"},
+	BOOT: {"path": "/boot", "name": "Boot"},
 	TEST: {"path": "/test", "name": "Test"},
 });
 
@@ -50,6 +51,280 @@ I made things easier for myself and made navigation happen through this md-page 
 const NOTFOUND_HTML = String.raw`<div class="markdown-body"><h1>Page not found</h1>
 <p>You seem to have navigated to a page that doesn't exist, sorry!</p>
 <p>You can go back in the navigation menu on the top left, or with <a class="self-link" onclick=page_navigate("/")>this link</a></p>
+</div>`;
+const BOOT_HTML = String.raw`<div class="markdown-body"><h1>Boot-rs securing a Linux bootloader</h1>
+<p>I recently dug into a previously unfamiliar part of Linux, the bootloader.</p>
+<h2>Preamble, Security keys</h2>
+<p>I got some <a href="https://www.yubico.com/">Yubikeys</a> lately. Yubikeys are security keys, which essentially is a fancy
+name for a drive (USB in this case) created to store secrets securely.</p>
+<p>Some secrets that are loaded into the key cannot escape at all, they can even be created on the key, never having seen
+the light of day.<br>
+Some secrets can escape and can therefore be injected as part of a pipeline in other security processes. An example
+of this could be storing a cryptodisk secret which is then passed to <a href="https://gitlab.com/cryptsetup/cryptsetup">cryptsetup</a>
+in the case of Linux disk encryption.</p>
+<p>I did some programming against the Yubikeys, I published a small runner to sign data with a Yubikey <a href="https://github.com/MarcusGrass/yk-verify">here</a>
+but got a bit discouraged by the need for <a href="https://pcsclite.apdu.fr/">pcscd</a> to connect.<br>
+Later I managed to do a pure rust integration against the Linux usb driver, and will publish that pretty soon.</p>
+<p>Then I started thinking about if I could integrate this into my boot process, I got derailed.</p>
+<h2>Bootloader woes</h2>
+<p>I have used <a href="https://en.wikipedia.org/wiki/GNU_GRUB">GRUB</a> as my bootloader since I started using Linux, it has generally
+worked well, but it does feel old.</p>
+<p>When I ran <code>grub-mkconfig -o ...</code>, updating my boot configuration, and ran into
+<a href="https://www.reddit.com/r/EndeavourOS/comments/wygfds/full_transparency_on_the_grub_issue/">this</a> issue I figured it
+was time to look over the alternatives. After burning another ISO to get back into my system.</p>
+<h2>Bootloader alternatives</h2>
+<p>I was looking into alternatives, finding <a href="https://wiki.archlinux.org/title/EFISTUB">efi stub</a> to be the most appealing option,
+if the kernel can boot itself, why even have a bootloader?</p>
+<p>With gentoo, integrating that was fairly easy assuming no disk encryption.</p>
+<p>Before getting into this, a few paragraphs about the Linux boots process may be appropriate</p>
+<h2>Boot in short</h2>
+<p>The boot process, in my opinion, starts on the motherboard and ends when the kernel hands over execution to <code>/sbin/init</code>.</p>
+<h3>UEFI</h3>
+<p>The motherboard powers on and starts running UEFI firmware (I'm pretending bios don't exist because I'm not stuck in the past).<br>
+UEFI can run images, such as disk, keyboard, and basic display-drivers, kernels, and Rust binaries.</p>
+<p>Usually, this stage of the process will be short, as the default task to perform is to check if the user wants to enter
+setup and interface with the UEFI system, or continue with the highest priority boot-image.</p>
+<p>That boot image could be a grub.efi-program, which may perform some work, such as decrypting your boot partition and then
+handing execution over to the kernel image.<br>
+It could also be an efi stub kernel image that gets loaded directly, or some other bootloader.</p>
+<h3>Kernel boot</h3>
+<p>The kernel process starts, initializing the memory it needs, starting tasks, and whatever else the kernel does.</p>
+<h3>Initramfs</h3>
+<p>When the kernel has performed its initialization, early userspace starts in the initramfs.<br>
+<a href="https://en.wikipedia.org/wiki/Initial_ramdisk">Initramfs</a> also called early userspace, is the first place a Linux user
+is likely to spread their bash-spaghetti in the boot-process.</p>
+<p>The initramfs is a ram-contained (in-memory) file-system, <a href="https://cateee.net/lkddb/web-lkddb/INITRAMFS_SOURCE.html">it can be baked into the kernel</a>,
+or provided where the kernel can find it during the boot process. Its purpose is to set up user-space so that it's ready
+enough for <code>init</code> to take over execution. Here is where disk-decryption happens in the case of <code>cryptsetup</code>.</p>
+<p>The Initramfs-stage ends by handing over execution to <code>init</code>:</p>
+<p><code>exec switch_root &#x3C;root-partition> &#x3C;init></code>, an example could be <code>exec switch_root /mnt/root /sbin/init</code>,
+by convention, <code>init</code> is usually <code>/sbin/init</code>.</p>
+<p>The initramfs prepares user-space, while <code>init</code> "starts" it, e.g. processes, such as <a href="https://wiki.archlinux.org/title/dhcpcd">dhcpcd</a>,
+are taken care of by <code>init</code>.</p>
+<h3>Init</h3>
+<p>Init is the first userspace process to be started, the parent to all other processes, it has PID 1 and if it dies,
+the kernel panics.
+Init could be any executable, like <a href="https://en.wikipedia.org/wiki/Bash_(Unix_shell)">Bash</a>.</p>
+<p>In an example system where bash is init, the user will be dropped into the command-line at the destination that the
+initramfs specified in <code>switch_root</code>. From a common user's perspective this is barely a functional system, it has no internet,
+it will likely not have connections to a lot of peripheral devices, and there is no login management.</p>
+<h4>Init daemon</h4>
+<p>Usually Linux systems have an init daemon. Some common init-daemons are <a href="https://en.wikipedia.org/wiki/Systemd">systemd</a>, <a href="https://en.wikipedia.org/wiki/OpenRC">openrc</a>,
+and <a href="https://en.wikipedia.org/wiki/Runit">runit</a>.<br>
+The init daemon's job is to start processes that makes the system usable, up to the user's specification. Usually it
+will start <code>udev</code> to get device events and populate <code>/dev</code> with device interfaces, as well as ready internet interfaces
+and start login management.</p>
+<h2>DIY initramfs</h2>
+<p>I wanted basic security, this means encrypted disks, if I lose my computer, or it gets stolen, I can be fairly sure that
+they won't get access to my data without considerable effort.<br>
+Looking back up over the steps, it means that I need to create an initramfs, so that my disks can be decrypted on boot.
+There are tools to create an initramfs, <a href="https://en.wikipedia.org/wiki/Dracut_(software)">dracut</a> being
+one example,<a href="https://wiki.archlinux.org/title/Mkinitcpio">mkinitcpio</a> that Arch Linux uses being another.</p>
+<p>Taking things to the most absurd level, I figured I'd write my own initramfs instead.</p>
+<h3>The process</h3>
+<p>The most basic decrypting initramfs is just a directory which could be created like this:</p>
+<div class="highlight highlight-shell"><pre>[gramar@grentoo /home/gramar/misc/initramfs]<span class="pl-c"># touch init</span>
+[gramar@grentoo /home/gramar/misc/initramfs]<span class="pl-c"># chmod +x init</span>
+[gramar@grentoo /home/gramar/misc/initramfs]<span class="pl-c"># mkdir -p mnt/root</span>
+[gramar@grentoo /home/gramar/misc/initramfs]<span class="pl-c"># ls -lah</span>
+total 12K
+drwxr-xr-x 3 gramar gramar 4.0K Mar 21 15:11 <span class="pl-c1">.</span>
+drwxr-xr-x 4 gramar gramar 4.0K Mar 21 15:11 ..
+-rwxr-xr-x 1 gramar gramar    0 Mar 21 15:11 init
+drwxr-xr-x 3 gramar gramar 4.0K Mar 21 15:11 mnt
+</pre></div>
+<p>The init contents being this:</p>
+<div class="highlight highlight-shell"><pre><span class="pl-c">#!/bin/bash</span>
+cryptsetup open /dev/disk/by-uuid/<span class="pl-k">&#x3C;</span>xxxx<span class="pl-k">></span> croot <span class="pl-c"># Enter password</span>
+cryptsetup open /dev/disk/by-uuid/<span class="pl-k">&#x3C;</span>xxxx<span class="pl-k">></span> cswap <span class="pl-c"># Enter password</span>
+cryptsetup open /dev/disk/by-uuid/<span class="pl-k">&#x3C;</span>xxxx<span class="pl-k">></span> chome <span class="pl-c"># Enter password</span>
+<span class="pl-c"># Mount filesystem</span>
+mount /dev/mapper/croot /mnt/root
+mount /dev/mapper/chome /mnt/root/home
+swapon /dev/mapper/cswap 
+<span class="pl-c"># Hand over execution to init</span>
+<span class="pl-c1">exec</span> switch_root /mnt/root /sbin/init
+</pre></div>
+<p>If we point the kernel at this directory, build it, and then try to boot it, we'll find out that this doesn't work at all,
+and if you somehow ended up here through Googling and copied that, I'm sorry.</p>
+<p>One reason for this is that <code>/bin/bàsh</code> does not exist on the initramfs, we can't call it to execute the commands in the scripts.</p>
+<p>If we add it, for example by:</p>
+<div class="highlight highlight-shell"><pre>[gramar@grentoo /home/gramar/misc/initramfs]<span class="pl-c"># mkdir bin</span>
+[gramar@grentoo /home/gramar/misc/initramfs]<span class="pl-c"># cp /bin/bash bin/bash</span>
+</pre></div>
+<p>Then try again, it still won't work and will result in a kernel panic.<br>
+The reason is that bash (if you didn't build it yourself using dark magic), is dynamically
+linked, we can see that this is indeed the case using <a href="https://en.wikipedia.org/wiki/Ldd_(Unix)">ldd</a>
+to list dynamic dependencies.</p>
+<div class="highlight highlight-shell"><pre>[gramar@grentoo /home/gramar/misc/initramfs]<span class="pl-c"># ldd bin/bash</span>
+        linux-vdso.so.1 (0x00007ffc7f9a1000)
+        libreadline.so.8 =<span class="pl-k">></span> /lib64/libreadline.so.8 (0x00007fd040f06000)
+        libtinfo.so.6 =<span class="pl-k">></span> /lib64/libtinfo.so.6 (0x00007fd040ec6000)
+        libc.so.6 =<span class="pl-k">></span> /lib64/libc.so.6 (0x00007fd040cf3000)
+        libtinfow.so.6 =<span class="pl-k">></span> /lib64/libtinfow.so.6 (0x00007fd040cb2000)
+        /lib64/ld-linux-x86-64.so.2 (0x00007fd04104f000)
+</pre></div>
+<p>Now we can just try to appease <code>Bash</code> here and copy these dependencies into the initramfs at the appropriate places,
+but there are quite a few files, and we risk cascading dependencies, what if we need to update and the dependencies have changed?</p>
+<p>And how about <code>cryptsetup</code>, <code>mount</code>, <code>swapon</code>, and <code>switch_root</code>?</p>
+<h4>Static linking and BusyBox</h4>
+<p>Many of the tools used to interface with Linux (usually) come from <a href="https://en.wikipedia.org/wiki/GNU_Core_Utilities">GNU coreutils</a>.<br>
+There are other sources however, like <a href="https://github.com/uutils/coreutils">the Rust port</a>, but the most popular is likely
+<a href="https://en.wikipedia.org/wiki/BusyBox">BusyBox</a>.</p>
+<p>BusyBox is a single binary which on my machine is 2.2M big, it contains most of the coreutils.<br>
+One benefit of using BusyBox is that it can easily be <a href="https://en.wikipedia.org/wiki/Static_library">statically linked</a>
+which means that copying that single binary is enough, no dependencies required.<br>
+Likewise <code>cryptsetup</code> can be statically linked.</p>
+<h3>Busybox initramfs</h3>
+<p>We place the binaries in the initramfs. (We also realize we need a tty, console, and null to run our shell so copy those too).</p>
+<div class="highlight highlight-shell"><pre>[gramar@grentoo /home/gramar/misc/initramfs]<span class="pl-c"># cp /bin/busybox bin/busybox</span>
+[gramar@grentoo /home/gramar/misc/initramfs]<span class="pl-c"># mkdir sbin        </span>
+[gramar@grentoo /home/gramar/misc/initramfs]<span class="pl-c"># cp /sbin/cryptsetup sbin/cryptsetup</span>
+[gramar@grentoo /home/gramar/misc/initramfs]<span class="pl-c"># cp -a /dev/{null,console,tty} dev</span>
+</pre></div>
+<p>And then change the script's <a href="https://en.wikipedia.org/wiki/Shebang_(Unix)">shebang</a>.</p>
+<div class="highlight highlight-shell"><pre><span class="pl-c">#!/bin/busybox sh</span>
+<span class="pl-k">export</span> PATH=<span class="pl-s"><span class="pl-pds">"</span>/bin:/sbin:<span class="pl-smi">$PATH</span><span class="pl-pds">"</span></span>
+cryptsetup open /dev/disk/by-uuid/<span class="pl-k">&#x3C;</span>xxxx<span class="pl-k">></span> croot <span class="pl-c"># Enter password</span>
+cryptsetup open /dev/disk/by-uuid/<span class="pl-k">&#x3C;</span>xxxx<span class="pl-k">></span> cswap <span class="pl-c"># Enter password</span>
+cryptsetup open /dev/disk/by-uuid/<span class="pl-k">&#x3C;</span>xxxx<span class="pl-k">></span> chome <span class="pl-c"># Enter password</span>
+<span class="pl-c"># Mount filesystem</span>
+mount /dev/mapper/croot /mnt/root
+mount /dev/mapper/chome /mnt/root/home
+swapon /dev/mapper/cswap 
+<span class="pl-c"># Hand over execution to init</span>
+<span class="pl-c1">exec</span> switch_root /mnt/root /sbin/init
+</pre></div>
+<p>Finally, we can execute the init script at boot time, and immediately panic again, <code>cryptsetup</code> can't find the disk.</p>
+<h3>Udev</h3>
+<p>There are multiple ways to address disks, we could for example, copy the disk we need in the initramfs as it shows up
+under /dev, <code>cp -a /dev/sda2 dev</code>.  But the regular disk naming convention isn't static, <code>/dev/sda</code> might be tomorrow's
+<code>/dev/sdb</code>. Causing an un-bootable system, ideally we would specify it by uuid.</p>
+<p>Udev is a tool that finds devices, listens to device events, and a bit more. What we need it for, is to populate
+<code>/dev</code> with the devices that we expect.</p>
+<p>I call it Udev because it's ubiquitous, it's actually a <a href="https://en.wikipedia.org/wiki/Udev">systemd project</a>.<br>
+There is a fork, that used to be maintained by the Gentoo maintainers, <a href="https://en.wikipedia.org/wiki/Systemd#Forks_and_alternative_implementations">Eudev</a>.<br>
+Both of the above are not ideal for an initramfs, what we'd really like is to just oneshot generate <code>/dev</code>.<br>
+Luckily for us, there is a perfect implementation that does just that, contained within BusyBox, <a href="https://wiki.gentoo.org/wiki/Mdev">Mdev</a>.</p>
+<p>To save us from further panics, I will fast-forward through discovering that we need to mount three pseudo-filesystems
+to make mdev work, <code>proc</code>, <code>sys</code>, and <code>dev</code> (<code>dev</code> shouldn't be that surprising). We also need to create the mount points.</p>
+<div class="highlight highlight-shell"><pre>[gramar@grentoo /home/gramar/misc/initramfs]<span class="pl-c"># mkdir proc</span>
+[gramar@grentoo /home/gramar/misc/initramfs]<span class="pl-c"># mkdir dev</span>
+[gramar@grentoo /home/gramar/misc/initramfs]<span class="pl-c"># mkdir sys</span>
+</pre></div>
+<h3>Working initramfs</h3>
+<div class="highlight highlight-shell"><pre><span class="pl-c">#!/bin/busybox sh</span>
+<span class="pl-k">export</span> PATH=<span class="pl-s"><span class="pl-pds">"</span>/bin:/sbin:<span class="pl-smi">$PATH</span><span class="pl-pds">"</span></span>
+<span class="pl-c"># Mount pseudo filesystems</span>
+mount -t proc none /proc
+mount -t sysfs none /sys
+mount -t devtmpfs none /dev
+<span class="pl-c"># Mdev populates /dev with symlinks</span>
+mdev -s
+cryptsetup open /dev/disk/by-uuid/<span class="pl-k">&#x3C;</span>xxxx<span class="pl-k">></span> croot <span class="pl-c"># Enter password</span>
+cryptsetup open /dev/disk/by-uuid/<span class="pl-k">&#x3C;</span>xxxx<span class="pl-k">></span> cswap <span class="pl-c"># Enter password</span>
+cryptsetup open /dev/disk/by-uuid/<span class="pl-k">&#x3C;</span>xxxx<span class="pl-k">></span> chome <span class="pl-c"># Enter password</span>
+<span class="pl-c"># Mount filesystem</span>
+mount /dev/mapper/croot /mnt/root
+mount /dev/mapper/chome /mnt/root/home
+swapon /dev/mapper/cswap 
+<span class="pl-c"># Unmount the pseudo filesystems, except dev which is now busy.  </span>
+umount /proc
+umount /sys
+<span class="pl-c"># Hand over execution to init</span>
+<span class="pl-c1">exec</span> switch_root /mnt/root /sbin/init
+</pre></div>
+<h3>Ergonomics</h3>
+<p>This setup requires me to enter my password three times, which is easily fixed by saving it in a variable and piping
+it into <code>cryptsetup</code>.</p>
+<h2>Reflections on security</h2>
+<p>While the above setup works, it has less security than my last.<br>
+I boot directly into my kernel which now must be unencrypted, and could therefore be tampered with.<br>
+This is a different attack-surface than the last considered one: I lose my laptop. It's: Someone tampers with my
+boot process to get access to my data on subsequent uses.</p>
+<h3>Bootloader tampering</h3>
+<p>Depending on your setup, your bootloader (kernel in this case) may be more or less subject to tampering.<br>
+Usually, one would have the bootloader in a <code>/boot</code> directory, which may or may not be on a separate partition.</p>
+<p>If that directory is writeable only by root, it doesn't really matter if it's on an unmounted partition or not.<br>
+Someone with root access to your machine could edit the contents (or mount the partition and then edit the contents).<br>
+That means that if someone has root access to your machine then your bootloader could be tampered with remotely.</p>
+<h4>Evil maids</h4>
+<p>Another possible avenue of compromise is if someone has physical access to the disk on which you store your bootloader.<br>
+I am not a high-value target, as far as I know at least, and that kind of attack, also known as an <a href="https://en.wikipedia.org/wiki/Evil_maid_attack">evil maid attack</a>
+is fairly high-effort to pull off.  The attacker needs to modify my kernel without me noticing, which for me as a target,
+again, is pretty far-fetched.</p>
+<p>But this is not about being reasonable, it's never been about that, it's about taking things to the extreme.</p>
+<h3>Encrypting the kernel</h3>
+<p>The problem with encrypting the kernel is that something has to decrypt it, we need to move further down the boot-chain.<br>
+I need to, at the UEFI level, decrypt and then hand over execution to the kernel image.</p>
+<h2>Writing a bootloader</h2>
+<p>I hinted earlier at UEFI being able to run Rust binaries, indeed there is an <a href="https://github.com/rust-osdev/uefi-rs">UEFI</a> target
+and library for Rust.</p>
+<h3>Encrypt and Decrypt without storing secrets</h3>
+<p>We can't have the bootloader encrypted, the buck stops here, it needs to be a ready UEFI image.<br>
+This means that we can't store decryption keys in the bootloader, it needs to ask the user for input
+and deterministically derive the decryption key from that input.</p>
+<p>Best practice for secure symmetric encryption is <a href="https://en.wikipedia.org/wiki/Advanced_Encryption_Standard">AES</a>,
+since I want the beefiest encryption, I opt for AES-256, that means that the decryption key is 32 bytes long.</p>
+<p>Brute forcing a random set of 32 bytes is currently not feasible, but passwords generally are not random and random brute forcing
+would not likely be the method anyone would use to attack this encryption scheme.<br>
+What is more likely is that a password list would be used to try leaked, or dictionary-generated passwords.</p>
+<p>To increase security a bit the 32 bytes will be generated by a good key derivation function, at the moment <a href="https://en.wikipedia.org/wiki/Argon2">Argon2</a>
+is in my opinion the best tool for that. This achieves to objectives:</p>
+<ol>
+<li>Whatever the length of your password it will end up being 32 random(-ish) bytes long.</li>
+<li>The time and computational cost of brute forcing a password will be extended by the time it takes to
+run argon2 to the derive a key from each password that is attempted.</li>
+</ol>
+<p>This leaves the attacker with two options:</p>
+<ol>
+<li>Randomly try to brute force every 32 byte combination, which is unfeasible.</li>
+<li>Use a password list and try every known or generated password after running argon2 on it.</li>
+</ol>
+<p>Option 2 may or may not be unfeasible, depending on the strength of the password, transforming a bad password
+into 32 bytes doesn't do much if the password doesn't take enough attempts to guess.</p>
+<h3>Uefi development</h3>
+<p>I fire up a new virtual machine, with UEFI support, and start iterating. The development process was less painful than
+I thought that It would be. The caveat being that I am writing an extremely simple bootloader, it finds the kernel
+on disk, asks the user for a password, derives a key from it using Argon2, decrypts the kernel with that key, and
+then hands over execution to the decrypted kernel.</p>
+<h2>New reflections on security</h2>
+<p>All post-boot code, as well as the kernel is now encrypted, the kernel itself is read straight into RAM and then executed,
+the initramfs decrypts the disks after getting password input, deletes itself, and then hands over execution to <code>init</code>.</p>
+<h3>Bootloader compromise</h3>
+<p>There is still one surface for attack, the unencrypted bootloader.<br>
+A malicious actor could replace my bootloader with something else, take my keyboard input, and decrypt my kernel.
+Or an attacker could replace my bootloader, take my keyboard input (possibly just discarding it), then boot into a malicious kernel where I enter
+my decryption keys, and decrypt my disks.</p>
+<h3>Moving cryptodisk secrets into the initramfs</h3>
+<p>Since the initramfs is now encrypted, an ergonomic move is to create a new decryption key for my disks,
+move that into the initramfs, then use those secrets to decrypt the disks automatically during that stage.</p>
+<p>The "boot into malicious kernel attack", becomes more difficult to pull off.
+I'd notice if my disks aren't being automatically decrypted.</p>
+<h2>Secure boot</h2>
+<p>Some people think Secure Boot and UEFI in general is a cynical push by Microsoft to force Linux desktop user share
+down to zero (from close to zero).  Perhaps, but Secure Boot can be used to add some security to the most sensitive part
+of our now fairly secured boot process.</p>
+<p>Secure Boot works by only allowing the UEFI firmware to boot from images that are signed by its stored cryptographic keys.<br>
+Microsoft's keys are (almost) always vendored and exist in the store by default, but they can be removed (kind of) and
+replaced by your own keys.</p>
+<p>The process for adding your own keys to Secure Boot, as well as signing your bootloader, will be left out of this write-up.</p>
+<h1>Final reflections on security</h1>
+<p>Now my boot-process is about as secure as I am capable of making it while retaining some sense of ergonomics.<br>
+The disks are encrypted and can't easily be decrypted. The kernel itself is decrypted and I would notice if it's replaced
+by something else through the auto-decryption.<br>
+The bootloader cannot be exchanged without extracting my setup password.</p>
+<p>The main causes of concerns are now BUGS, and still, evil maids.</p>
+<ol>
+<li>Bugs in secure boot.</li>
+<li>Bugs in my implementation.</li>
+<li>Bugs in the AES library that I'm using.</li>
+<li>Bugs in the Argon2 library that I'm using.</li>
+<li>Bugs in <code>cryptsetup</code>.</li>
+<li>Bugs everywhere.</li>
+</ol>
+<p>But those are hard to get away from.</p>
+<p>Thanks for reading!</p>
 </div>`;
 const META_HTML = String.raw`<div class="markdown-body"><h1>Writing these pages</h1>
 <p>I did a number of rewrites of this web application, some of which could probably be
@@ -492,6 +767,11 @@ const TEST_HTML = String.raw`<div class="markdown-body"><h1>Here's a test write-
 			.innerHTML = create_nav_button("Home", "/") + create_nav_button("Table of contents", "/table-of-contents");
 		document.getElementById("content")
 			.innerHTML = PGWM03_HTML;
+	} else if (location === Location.BOOT.path) {
+		document.getElementById("menu")
+			.innerHTML = create_nav_button("Home", "/") + create_nav_button("Table of contents", "/table-of-contents");
+		document.getElementById("content")
+			.innerHTML = BOOT_HTML;
 	} else if (location === Location.TEST.path) {
 		document.getElementById("menu")
 			.innerHTML = create_nav_button("Home", "/") + create_nav_button("Table of contents", "/table-of-contents");
