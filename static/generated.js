@@ -45,6 +45,7 @@ I made things easier for myself and made navigation happen through this md-page 
 <ul>
 <li><a class="self-link" onclick=page_navigate("/meta")>This page</a></li>
 <li><a class="self-link" onclick=page_navigate("/pgwm03")>Pgwm03</a></li>
+<li><a class="self-link" onclick=page_navigate("/boot")>Boot</a></li>
 <li><a class="self-link" onclick=page_navigate("/test")>Test</a></li>
 </ul>
 </div>`;
@@ -55,7 +56,7 @@ const NOTFOUND_HTML = String.raw`<div class="markdown-body"><h1>Page not found</
 const BOOT_HTML = String.raw`<div class="markdown-body"><h1>Boot-rs securing a Linux bootloader</h1>
 <p>I recently dug into a previously unfamiliar part of Linux, the bootloader.</p>
 <h2>Preamble, Security keys</h2>
-<p>I got some <a href="https://www.yubico.com/">Yubikeys</a> lately. Yubikeys are security keys, which essentially is a fancy
+<p>I got some <a href="https://www.yubico.com/">Yubikeys</a> recently. Yubikeys are security keys, which essentially is a fancy
 name for a drive (USB in this case) created to store secrets securely.</p>
 <p>Some secrets that are loaded into the key cannot escape at all, they can even be created on the key, never having seen
 the light of day.<br>
@@ -64,21 +65,21 @@ of this could be storing a cryptodisk secret which is then passed to <a href="ht
 in the case of Linux disk encryption.</p>
 <p>I did some programming against the Yubikeys, I published a small runner to sign data with a Yubikey <a href="https://github.com/MarcusGrass/yk-verify">here</a>
 but got a bit discouraged by the need for <a href="https://pcsclite.apdu.fr/">pcscd</a> to connect.<br>
-Later I managed to do a pure rust integration against the Linux usb driver, and will publish that pretty soon.</p>
+Later I managed to do a pure rust integration against the Linux usb interface, and will publish that pretty soon.</p>
 <p>Then I started thinking about if I could integrate this into my boot process, I got derailed.</p>
 <h2>Bootloader woes</h2>
 <p>I have used <a href="https://en.wikipedia.org/wiki/GNU_GRUB">GRUB</a> as my bootloader since I started using Linux, it has generally
 worked well, but it does feel old.</p>
 <p>When I ran <code>grub-mkconfig -o ...</code>, updating my boot configuration, and ran into
 <a href="https://www.reddit.com/r/EndeavourOS/comments/wygfds/full_transparency_on_the_grub_issue/">this</a> issue I figured it
-was time to look over the alternatives. After burning another ISO to get back into my system.</p>
+was time to survey for other options. After burning another ISO to get back into my system.</p>
 <h2>Bootloader alternatives</h2>
 <p>I was looking into alternatives, finding <a href="https://wiki.archlinux.org/title/EFISTUB">efi stub</a> to be the most appealing option,
 if the kernel can boot itself, why even have a bootloader?</p>
 <p>With gentoo, integrating that was fairly easy assuming no disk encryption.</p>
-<p>Before getting into this, a few paragraphs about the Linux boots process may be appropriate</p>
+<p>Before getting into this, a few paragraphs about the Linux boots process may be appropriate.</p>
 <h2>Boot in short</h2>
-<p>The boot process, in my opinion, starts on the motherboard and ends when the kernel hands over execution to <code>/sbin/init</code>.</p>
+<p>The boot process, in my opinion, starts on the motherboard firmware and ends when the kernel hands over execution to <code>/sbin/init</code>.</p>
 <h3>UEFI</h3>
 <p>The motherboard powers on and starts running UEFI firmware (I'm pretending bios don't exist because I'm not stuck in the past).<br>
 UEFI can run images, such as disk, keyboard, and basic display-drivers, kernels, and Rust binaries.</p>
@@ -91,21 +92,21 @@ It could also be an efi stub kernel image that gets loaded directly, or some oth
 <p>The kernel process starts, initializing the memory it needs, starting tasks, and whatever else the kernel does.</p>
 <h3>Initramfs</h3>
 <p>When the kernel has performed its initialization, early userspace starts in the initramfs.<br>
-<a href="https://en.wikipedia.org/wiki/Initial_ramdisk">Initramfs</a> also called early userspace, is the first place a Linux user
+<a href="https://en.wikipedia.org/wiki/Initial_ramdisk">Initramfs</a>, also called early userspace, is the first place a Linux user
 is likely to spread their bash-spaghetti in the boot-process.</p>
 <p>The initramfs is a ram-contained (in-memory) file-system, <a href="https://cateee.net/lkddb/web-lkddb/INITRAMFS_SOURCE.html">it can be baked into the kernel</a>,
 or provided where the kernel can find it during the boot process. Its purpose is to set up user-space so that it's ready
 enough for <code>init</code> to take over execution. Here is where disk-decryption happens in the case of <code>cryptsetup</code>.</p>
 <p>The Initramfs-stage ends by handing over execution to <code>init</code>:</p>
 <p><code>exec switch_root &#x3C;root-partition> &#x3C;init></code>, an example could be <code>exec switch_root /mnt/root /sbin/init</code>,
-by convention, <code>init</code> is usually <code>/sbin/init</code>.</p>
+by convention, <code>init</code> is usually found at <code>/sbin/init</code>.</p>
 <p>The initramfs prepares user-space, while <code>init</code> "starts" it, e.g. processes, such as <a href="https://wiki.archlinux.org/title/dhcpcd">dhcpcd</a>,
 are taken care of by <code>init</code>.</p>
 <h3>Init</h3>
 <p>Init is the first userspace process to be started, the parent to all other processes, it has PID 1 and if it dies,
 the kernel panics.
 Init could be any executable, like <a href="https://en.wikipedia.org/wiki/Bash_(Unix_shell)">Bash</a>.</p>
-<p>In an example system where bash is init, the user will be dropped into the command-line at the destination that the
+<p>In an example system where bash is init, the user will be dropped into the command-line, in a bash shell, at the destination that the
 initramfs specified in <code>switch_root</code>. From a common user's perspective this is barely a functional system, it has no internet,
 it will likely not have connections to a lot of peripheral devices, and there is no login management.</p>
 <h4>Init daemon</h4>
@@ -116,10 +117,10 @@ will start <code>udev</code> to get device events and populate <code>/dev</code>
 and start login management.</p>
 <h2>DIY initramfs</h2>
 <p>I wanted basic security, this means encrypted disks, if I lose my computer, or it gets stolen, I can be fairly sure that
-they won't get access to my data without considerable effort.<br>
+the culprits won't get access to my data without considerable effort.<br>
 Looking back up over the steps, it means that I need to create an initramfs, so that my disks can be decrypted on boot.
 There are tools to create an initramfs, <a href="https://en.wikipedia.org/wiki/Dracut_(software)">dracut</a> being
-one example,<a href="https://wiki.archlinux.org/title/Mkinitcpio">mkinitcpio</a> that Arch Linux uses being another.</p>
+one example, <a href="https://wiki.archlinux.org/title/Mkinitcpio">mkinitcpio</a> that Arch Linux uses is another.</p>
 <p>Taking things to the most absurd level, I figured I'd write my own initramfs instead.</p>
 <h3>The process</h3>
 <p>The most basic decrypting initramfs is just a directory which could be created like this:</p>
@@ -198,7 +199,7 @@ swapon /dev/mapper/cswap
 <p>Finally, we can execute the init script at boot time, and immediately panic again, <code>cryptsetup</code> can't find the disk.</p>
 <h3>Udev</h3>
 <p>There are multiple ways to address disks, we could for example, copy the disk we need in the initramfs as it shows up
-under /dev, <code>cp -a /dev/sda2 dev</code>.  But the regular disk naming convention isn't static, <code>/dev/sda</code> might be tomorrow's
+under <code>/dev</code>, <code>cp -a /dev/sda2 dev</code>.  But the regular disk naming convention isn't static, <code>/dev/sda</code> might be tomorrow's
 <code>/dev/sdb</code>. Causing an un-bootable system, ideally we would specify it by uuid.</p>
 <p>Udev is a tool that finds devices, listens to device events, and a bit more. What we need it for, is to populate
 <code>/dev</code> with the devices that we expect.</p>
