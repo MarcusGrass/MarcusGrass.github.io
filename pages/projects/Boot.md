@@ -1,6 +1,16 @@
 # Boot-rs securing a Linux bootloader
 I recently dug into a previously unfamiliar part of Linux, the bootloader.  
 
+This is a medium-length write-up of how the Linux boot-process works and how to modify it, told through 
+the process of me writing my own janky bootloader.  
+
+I wanted the boot process to be understandable, ergonomic, and secure.  
+
+## Notes about distributions
+I did what's described in this write-up on Gentoo, although it would work the same on any 
+linux machine. Depending on the distribution this setup might not be feasible. Likely these steps would have to 
+be modified depending on the circumstance.  
+
 ## Preamble, Security keys
 I got some [Yubikeys](https://www.yubico.com/) recently. Yubikeys are security keys, which essentially is a fancy 
 name for a drive (USB in this case) created to store secrets securely.  
@@ -12,10 +22,12 @@ of this could be storing a cryptodisk secret which is then passed to [cryptsetup
 in the case of Linux disk encryption.  
 
 I did some programming against the Yubikeys, I published a small runner to sign data with a Yubikey [here](https://github.com/MarcusGrass/yk-verify)
-but got a bit discouraged by the need for [pcscd](https://pcsclite.apdu.fr/) to connect.  
+but got a bit discouraged by the need for [pcscd](https://pcsclite.apdu.fr/), a daemon with an accompanying c-library to 
+interface with it, to connect.  
 Later I managed to do a pure rust integration against the Linux usb interface, and will publish that pretty soon.  
 
-Then I started thinking about if I could integrate this into my boot process, I got derailed.  
+I started thinking about ways to integrate Yubikeys into my workflow more, I started 
+examining my boot process, I got derailed.  
 
 ## Bootloader woes
 I have used [GRUB](https://en.wikipedia.org/wiki/GNU_GRUB) as my bootloader since I started using Linux, it has generally 
@@ -26,12 +38,13 @@ When I ran `grub-mkconfig -o ...`, updating my boot configuration, and ran into
 was time to survey for other options. After burning another ISO to get back into my system.
 
 ## Bootloader alternatives
-I was looking into alternatives, finding [efi stub](https://wiki.archlinux.org/title/EFISTUB) to be the most appealing option, 
-if the kernel can boot itself, why even have a bootloader?  
+I was looking into alternatives, finding [efi stub](https://wiki.archlinux.org/title/EFISTUB), compiling the kernel 
+into its own bootable efi-image, to be the most appealing option. 
+If the kernel can boot itself, why even have a bootloader?  
 
-With gentoo, integrating that was fairly easy assuming no disk encryption.
+With Gentoo, integrating that was fairly easy assuming no disk encryption.
 
-Before getting into this, a few paragraphs about the Linux boots process may be appropriate.
+Before getting into this, a few paragraphs about the Linux boot process may be appropriate.
 
 ## Boot in short
 The boot process, in my opinion, starts on the motherboard firmware and ends when the kernel hands over execution to `/sbin/init`.  
@@ -79,12 +92,12 @@ it will likely not have connections to a lot of peripheral devices, and there is
 #### Init daemon
 Usually Linux systems have an init daemon. Some common init-daemons are [systemd](https://en.wikipedia.org/wiki/Systemd), [openrc](https://en.wikipedia.org/wiki/OpenRC), 
 and [runit](https://en.wikipedia.org/wiki/Runit).  
-The init daemon's job is to start processes that makes the system usable, up to the user's specification. Usually it 
+The init daemon's job is to start processes that make the system usable, up to the user's specification. Usually it 
 will start `udev` to get device events and populate `/dev` with device interfaces, as well as ready internet interfaces 
 and start login management.  
 
 ## DIY initramfs
-I wanted basic security, this means encrypted disks, if I lose my computer, or it gets stolen, I can be fairly sure that 
+I wanted at least basic security, this means encrypted disks, if I lose my computer, or it gets stolen, I can be fairly sure that 
 the culprits won't get access to my data without considerable effort.  
 Looking back up over the steps, it means that I need to create an initramfs, so that my disks can be decrypted on boot. 
 There are tools to create an initramfs, [dracut](https://en.wikipedia.org/wiki/Dracut_(software)) being 
@@ -158,10 +171,11 @@ There are other sources however, like [the Rust port](https://github.com/uutils/
 BusyBox is a single binary which on my machine is 2.2M big, it contains most of the coreutils.  
 One benefit of using BusyBox is that it can easily be [statically linked](https://en.wikipedia.org/wiki/Static_library) 
 which means that copying that single binary is enough, no dependencies required.  
-Likewise `cryptsetup` can be statically linked. 
+Likewise `cryptsetup` can easily be statically linked. 
 
 ### Busybox initramfs
-We place the binaries in the initramfs. (We also realize we need a tty, console, and null to run our shell so copy those too).  
+The binaries are placed in the initramfs. (I realize that I need a tty, console, and null to run our shell 
+so I copy those too).  
 
 ```bash
 [gramar@grentoo /home/gramar/misc/initramfs]# cp /bin/busybox bin/busybox
@@ -277,7 +291,7 @@ I hinted earlier at UEFI being able to run Rust binaries, indeed there is an [UE
 and library for Rust.  
 
 ### Encrypt and Decrypt without storing secrets
-We can't have the bootloader encrypted, the buck stops here, it needs to be a ready UEFI image.  
+We can't have the bootloader encrypted, it needs to be a ready UEFI image.  
 This means that we can't store decryption keys in the bootloader, it needs to ask the user for input 
 and deterministically derive the decryption key from that input.  
 
@@ -286,11 +300,12 @@ since I want the beefiest encryption, I opt for AES-256, that means that the dec
 
 Brute forcing a random set of 32 bytes is currently not feasible, but passwords generally are not random and random brute forcing 
 would not likely be the method anyone would use to attack this encryption scheme.  
-What is more likely is that a password list would be used to try leaked, or dictionary-generated passwords.  
+What is more likely is that a password list would be used to try leaked passwords, 
+or dictionary-generated passwords would be used.  
 
-To increase security a bit the 32 bytes will be generated by a good key derivation function, at the moment [Argon2](https://en.wikipedia.org/wiki/Argon2) 
-is in my opinion the best tool for that. This achieves to objectives:
-1. Whatever the length of your password it will end up being 32 random(-ish) bytes long.  
+To increase security a bit, the 32 bytes will be generated by a good key derivation function, at the moment [Argon2](https://en.wikipedia.org/wiki/Argon2) 
+is the best tool for that as far as I know. This achieves two objectives:
+1. Whatever the length of your password, it will end up being 32 random(-ish) bytes long.  
 2. The time and computational cost of brute forcing a password will be extended by the time it takes to 
 run argon2 to the derive a key from each password that is attempted.  
 
@@ -305,10 +320,10 @@ into 32 bytes doesn't do much if the password doesn't take enough attempts to gu
 I fire up a new virtual machine, with UEFI support, and start iterating. The development process was less painful than 
 I thought that It would be. The caveat being that I am writing an extremely simple bootloader, it finds the kernel 
 on disk, asks the user for a password, derives a key from it using Argon2, decrypts the kernel with that key, and 
-then hands over execution to the decrypted kernel.  
+then hands over execution to the decrypted kernel. The code for it can be found at [this repo](https://github.com/MarcusGrass/boot-rs).  
 
 ## New reflections on security
-All post-boot code, as well as the kernel is now encrypted, the kernel itself is read straight into RAM and then executed, 
+All post-boot content, as well as the kernel is now encrypted, the kernel itself is read straight into RAM and then executed, 
 the initramfs decrypts the disks after getting password input, deletes itself, and then hands over execution to `init`.  
 
 ### Bootloader compromise
@@ -335,7 +350,6 @@ replaced by your own keys.
 
 The process for adding your own keys to Secure Boot, as well as signing your bootloader, will be left out of this write-up.  
 
-
 # Final reflections on security
 Now my boot-process is about as secure as I am capable of making it while retaining some sense of ergonomics.  
 The disks are encrypted and can't easily be decrypted. The kernel itself is decrypted and I would notice if it's replaced 
@@ -351,5 +365,9 @@ The main causes of concerns are now BUGS, and still, evil maids.
 6. Bugs everywhere.  
 
 But those are hard to get away from. 
+
+# Epilogue
+I'm currently using this setup, and I will for as long as I use Gentoo I would guess. 
+Once set up it's pretty easy to re-compile and re-encrypt the kernel when it's time to upgrade.  
 
 Thanks for reading!

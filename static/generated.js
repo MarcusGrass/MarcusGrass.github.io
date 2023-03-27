@@ -55,6 +55,13 @@ const NOTFOUND_HTML = String.raw`<div class="markdown-body"><h1>Page not found</
 </div>`;
 const BOOT_HTML = String.raw`<div class="markdown-body"><h1>Boot-rs securing a Linux bootloader</h1>
 <p>I recently dug into a previously unfamiliar part of Linux, the bootloader.</p>
+<p>This is a medium-length write-up of how the Linux boot-process works and how to modify it, told through
+the process of me writing my own janky bootloader.</p>
+<p>I wanted the boot process to be understandable, ergonomic, and secure.</p>
+<h2>Notes about distributions</h2>
+<p>I did what's described in this write-up on Gentoo, although it would work the same on any
+linux machine. Depending on the distribution this setup might not be feasible. Likely these steps would have to
+be modified depending on the circumstance.</p>
 <h2>Preamble, Security keys</h2>
 <p>I got some <a href="https://www.yubico.com/">Yubikeys</a> recently. Yubikeys are security keys, which essentially is a fancy
 name for a drive (USB in this case) created to store secrets securely.</p>
@@ -64,9 +71,11 @@ Some secrets can escape and can therefore be injected as part of a pipeline in o
 of this could be storing a cryptodisk secret which is then passed to <a href="https://gitlab.com/cryptsetup/cryptsetup">cryptsetup</a>
 in the case of Linux disk encryption.</p>
 <p>I did some programming against the Yubikeys, I published a small runner to sign data with a Yubikey <a href="https://github.com/MarcusGrass/yk-verify">here</a>
-but got a bit discouraged by the need for <a href="https://pcsclite.apdu.fr/">pcscd</a> to connect.<br>
+but got a bit discouraged by the need for <a href="https://pcsclite.apdu.fr/">pcscd</a>, a daemon with an accompanying c-library to
+interface with it, to connect.<br>
 Later I managed to do a pure rust integration against the Linux usb interface, and will publish that pretty soon.</p>
-<p>Then I started thinking about if I could integrate this into my boot process, I got derailed.</p>
+<p>I started thinking about ways to integrate Yubikeys into my workflow more, I started
+examining my boot process, I got derailed.</p>
 <h2>Bootloader woes</h2>
 <p>I have used <a href="https://en.wikipedia.org/wiki/GNU_GRUB">GRUB</a> as my bootloader since I started using Linux, it has generally
 worked well, but it does feel old.</p>
@@ -74,10 +83,11 @@ worked well, but it does feel old.</p>
 <a href="https://www.reddit.com/r/EndeavourOS/comments/wygfds/full_transparency_on_the_grub_issue/">this</a> issue I figured it
 was time to survey for other options. After burning another ISO to get back into my system.</p>
 <h2>Bootloader alternatives</h2>
-<p>I was looking into alternatives, finding <a href="https://wiki.archlinux.org/title/EFISTUB">efi stub</a> to be the most appealing option,
-if the kernel can boot itself, why even have a bootloader?</p>
-<p>With gentoo, integrating that was fairly easy assuming no disk encryption.</p>
-<p>Before getting into this, a few paragraphs about the Linux boots process may be appropriate.</p>
+<p>I was looking into alternatives, finding <a href="https://wiki.archlinux.org/title/EFISTUB">efi stub</a>, compiling the kernel
+into its own bootable efi-image, to be the most appealing option.
+If the kernel can boot itself, why even have a bootloader?</p>
+<p>With Gentoo, integrating that was fairly easy assuming no disk encryption.</p>
+<p>Before getting into this, a few paragraphs about the Linux boot process may be appropriate.</p>
 <h2>Boot in short</h2>
 <p>The boot process, in my opinion, starts on the motherboard firmware and ends when the kernel hands over execution to <code>/sbin/init</code>.</p>
 <h3>UEFI</h3>
@@ -112,11 +122,11 @@ it will likely not have connections to a lot of peripheral devices, and there is
 <h4>Init daemon</h4>
 <p>Usually Linux systems have an init daemon. Some common init-daemons are <a href="https://en.wikipedia.org/wiki/Systemd">systemd</a>, <a href="https://en.wikipedia.org/wiki/OpenRC">openrc</a>,
 and <a href="https://en.wikipedia.org/wiki/Runit">runit</a>.<br>
-The init daemon's job is to start processes that makes the system usable, up to the user's specification. Usually it
+The init daemon's job is to start processes that make the system usable, up to the user's specification. Usually it
 will start <code>udev</code> to get device events and populate <code>/dev</code> with device interfaces, as well as ready internet interfaces
 and start login management.</p>
 <h2>DIY initramfs</h2>
-<p>I wanted basic security, this means encrypted disks, if I lose my computer, or it gets stolen, I can be fairly sure that
+<p>I wanted at least basic security, this means encrypted disks, if I lose my computer, or it gets stolen, I can be fairly sure that
 the culprits won't get access to my data without considerable effort.<br>
 Looking back up over the steps, it means that I need to create an initramfs, so that my disks can be decrypted on boot.
 There are tools to create an initramfs, <a href="https://en.wikipedia.org/wiki/Dracut_(software)">dracut</a> being
@@ -175,9 +185,10 @@ There are other sources however, like <a href="https://github.com/uutils/coreuti
 <p>BusyBox is a single binary which on my machine is 2.2M big, it contains most of the coreutils.<br>
 One benefit of using BusyBox is that it can easily be <a href="https://en.wikipedia.org/wiki/Static_library">statically linked</a>
 which means that copying that single binary is enough, no dependencies required.<br>
-Likewise <code>cryptsetup</code> can be statically linked.</p>
+Likewise <code>cryptsetup</code> can easily be statically linked.</p>
 <h3>Busybox initramfs</h3>
-<p>We place the binaries in the initramfs. (We also realize we need a tty, console, and null to run our shell so copy those too).</p>
+<p>The binaries are placed in the initramfs. (I realize that I need a tty, console, and null to run our shell
+so I copy those too).</p>
 <div class="highlight highlight-shell"><pre>[gramar@grentoo /home/gramar/misc/initramfs]<span class="pl-c"># cp /bin/busybox bin/busybox</span>
 [gramar@grentoo /home/gramar/misc/initramfs]<span class="pl-c"># mkdir sbin        </span>
 [gramar@grentoo /home/gramar/misc/initramfs]<span class="pl-c"># cp /sbin/cryptsetup sbin/cryptsetup</span>
@@ -262,18 +273,19 @@ I need to, at the UEFI level, decrypt and then hand over execution to the kernel
 <p>I hinted earlier at UEFI being able to run Rust binaries, indeed there is an <a href="https://github.com/rust-osdev/uefi-rs">UEFI</a> target
 and library for Rust.</p>
 <h3>Encrypt and Decrypt without storing secrets</h3>
-<p>We can't have the bootloader encrypted, the buck stops here, it needs to be a ready UEFI image.<br>
+<p>We can't have the bootloader encrypted, it needs to be a ready UEFI image.<br>
 This means that we can't store decryption keys in the bootloader, it needs to ask the user for input
 and deterministically derive the decryption key from that input.</p>
 <p>Best practice for secure symmetric encryption is <a href="https://en.wikipedia.org/wiki/Advanced_Encryption_Standard">AES</a>,
 since I want the beefiest encryption, I opt for AES-256, that means that the decryption key is 32 bytes long.</p>
 <p>Brute forcing a random set of 32 bytes is currently not feasible, but passwords generally are not random and random brute forcing
 would not likely be the method anyone would use to attack this encryption scheme.<br>
-What is more likely is that a password list would be used to try leaked, or dictionary-generated passwords.</p>
-<p>To increase security a bit the 32 bytes will be generated by a good key derivation function, at the moment <a href="https://en.wikipedia.org/wiki/Argon2">Argon2</a>
-is in my opinion the best tool for that. This achieves to objectives:</p>
+What is more likely is that a password list would be used to try leaked passwords,
+or dictionary-generated passwords would be used.</p>
+<p>To increase security a bit, the 32 bytes will be generated by a good key derivation function, at the moment <a href="https://en.wikipedia.org/wiki/Argon2">Argon2</a>
+is the best tool for that as far as I know. This achieves two objectives:</p>
 <ol>
-<li>Whatever the length of your password it will end up being 32 random(-ish) bytes long.</li>
+<li>Whatever the length of your password, it will end up being 32 random(-ish) bytes long.</li>
 <li>The time and computational cost of brute forcing a password will be extended by the time it takes to
 run argon2 to the derive a key from each password that is attempted.</li>
 </ol>
@@ -288,9 +300,9 @@ into 32 bytes doesn't do much if the password doesn't take enough attempts to gu
 <p>I fire up a new virtual machine, with UEFI support, and start iterating. The development process was less painful than
 I thought that It would be. The caveat being that I am writing an extremely simple bootloader, it finds the kernel
 on disk, asks the user for a password, derives a key from it using Argon2, decrypts the kernel with that key, and
-then hands over execution to the decrypted kernel.</p>
+then hands over execution to the decrypted kernel. The code for it can be found at <a href="https://github.com/MarcusGrass/boot-rs">this repo</a>.</p>
 <h2>New reflections on security</h2>
-<p>All post-boot code, as well as the kernel is now encrypted, the kernel itself is read straight into RAM and then executed,
+<p>All post-boot content, as well as the kernel is now encrypted, the kernel itself is read straight into RAM and then executed,
 the initramfs decrypts the disks after getting password input, deletes itself, and then hands over execution to <code>init</code>.</p>
 <h3>Bootloader compromise</h3>
 <p>There is still one surface for attack, the unencrypted bootloader.<br>
@@ -325,6 +337,9 @@ The bootloader cannot be exchanged without extracting my setup password.</p>
 <li>Bugs everywhere.</li>
 </ol>
 <p>But those are hard to get away from.</p>
+<h1>Epilogue</h1>
+<p>I'm currently using this setup, and I will for as long as I use Gentoo I would guess.
+Once set up it's pretty easy to re-compile and re-encrypt the kernel when it's time to upgrade.</p>
 <p>Thanks for reading!</p>
 </div>`;
 const META_HTML = String.raw`<div class="markdown-body"><h1>Writing these pages</h1>
