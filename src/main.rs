@@ -8,13 +8,15 @@ const HOME_LABEL: &str = "Home";
 const NAV: LocationInfo = LocationInfo::new("/table-of-contents", "Nav");
 const NAV_LABEL: &str = "Table of contents";
 const NOT_FOUND: LocationInfo = LocationInfo::new("/not-found", "NotFound");
-const LOCATIONS: [LocationInfo; 7] = [
+const LOCATIONS: [LocationInfo; 9] = [
     HOME,
     NAV,
     NOT_FOUND,
     LocationInfo::new("/meta", "Meta"),
     LocationInfo::new("/pgwm03", "Pgwm03"),
     LocationInfo::new("/boot", "Boot"),
+    LocationInfo::new("/pgwm04", "Pgwm04"),
+    LocationInfo::new("/threads", "Threads"),
     LocationInfo::new("/test", "Test"),
 ];
 
