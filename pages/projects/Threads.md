@@ -89,10 +89,10 @@ Here's an equivalent `fork` using the `clone` syscall from `tiny-std`:
 /// See above
 #[cfg(target_arch = "aarch64")]
 pub unsafe fn fork() -> Result<PidT> {
-    // `SIGCHLD` is mandatory on aarch64 if mimicking fork it seems
+    // SIGCHLD is mandatory on aarch64 if mimicking fork it seems
     let cflgs = crate::platform::SignalKind::SIGCHLD;
     let res = syscall!(CLONE, cflgs.bits().0, 0, 0, 0, 0);
-    bail_on_below_zero!(res, "`CLONE` syscall failed");
+    bail_on_below_zero!(res, "CLONE syscall failed");
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     Ok(res as i32)
 }
@@ -279,13 +279,13 @@ The interface for the syscall is as follows:
 
 ```rust
 /// Syscall conventions are on 5 args:
-/// - arg -> arch: `reg`,
-/// - nr -> x86: `rax`, aarch64: `x8`
-/// - a1 -> x86: `rdi`, aarch64: `x0`
-/// - a2 -> x86: `rsi`, aarch64: `x1`
-/// - a3 -> x86: `rdx`, aarch64: `x2`
-/// - a4 -> x86: `r10`, aarch64: `x3`
-/// - a5 -> x86: `r8`,  aarch64: `x4`
+/// - arg -> arch: reg,
+/// - nr -> x86: rax, aarch64: x8
+/// - a1 -> x86: rdi, aarch64: x0
+/// - a2 -> x86: rsi, aarch64: x1
+/// - a3 -> x86: rdx, aarch64: x2
+/// - a4 -> x86: r10, aarch64: x3
+/// - a5 -> x86: r8,  aarch64: x4
 /// Pseudo: 
 extern "C" {
     fn syscall(nr: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize);

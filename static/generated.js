@@ -1034,10 +1034,10 @@ Here's an equivalent <code>fork</code> using the <code>clone</code> syscall from
 <span class="pl-c">/// See above</span>
 #[cfg(target_arch = <span class="pl-s">"aarch64"</span>)]
 <span class="pl-k">pub</span> <span class="pl-k">unsafe</span> <span class="pl-k">fn</span> <span class="pl-en">fork</span>() -> <span class="pl-k">Result</span>&#x3C;PidT> {
-    <span class="pl-c">// `SIGCHLD` is mandatory on aarch64 if mimicking fork it seems</span>
+    <span class="pl-c">// SIGCHLD is mandatory on aarch64 if mimicking fork it seems</span>
     <span class="pl-k">let</span> cflgs <span class="pl-k">=</span> <span class="pl-k">crate::</span>platform<span class="pl-k">::</span>SignalKind<span class="pl-k">::</span>SIGCHLD;
     <span class="pl-k">let</span> res <span class="pl-k">=</span> <span class="pl-en">syscall!</span>(CLONE, cflgs.<span class="pl-en">bits</span>().<span class="pl-c1">0</span>, <span class="pl-c1">0</span>, <span class="pl-c1">0</span>, <span class="pl-c1">0</span>, <span class="pl-c1">0</span>);
-    <span class="pl-en">bail_on_below_zero!</span>(res, <span class="pl-s">"`CLONE` syscall failed"</span>);
+    <span class="pl-en">bail_on_below_zero!</span>(res, <span class="pl-s">"CLONE syscall failed"</span>);
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     <span class="pl-c1">Ok</span>(res <span class="pl-k">as</span> <span class="pl-k">i32</span>)
 }
@@ -1188,13 +1188,13 @@ It takes the <code>stack_sz</code>, stack-size, which we'll need to deallocate t
 </ol>
 <p>The interface for the syscall is as follows:</p>
 <div class="highlight highlight-rust"><pre><span class="pl-c">/// Syscall conventions are on 5 args:</span>
-<span class="pl-c">/// - arg -> arch: `reg`,</span>
-<span class="pl-c">/// - nr -> x86: `rax`, aarch64: `x8`</span>
-<span class="pl-c">/// - a1 -> x86: `rdi`, aarch64: `x0`</span>
-<span class="pl-c">/// - a2 -> x86: `rsi`, aarch64: `x1`</span>
-<span class="pl-c">/// - a3 -> x86: `rdx`, aarch64: `x2`</span>
-<span class="pl-c">/// - a4 -> x86: `r10`, aarch64: `x3`</span>
-<span class="pl-c">/// - a5 -> x86: `r8`,  aarch64: `x4`</span>
+<span class="pl-c">/// - arg -> arch: reg,</span>
+<span class="pl-c">/// - nr -> x86: rax, aarch64: x8</span>
+<span class="pl-c">/// - a1 -> x86: rdi, aarch64: x0</span>
+<span class="pl-c">/// - a2 -> x86: rsi, aarch64: x1</span>
+<span class="pl-c">/// - a3 -> x86: rdx, aarch64: x2</span>
+<span class="pl-c">/// - a4 -> x86: r10, aarch64: x3</span>
+<span class="pl-c">/// - a5 -> x86: r8,  aarch64: x4</span>
 <span class="pl-c">/// Pseudo: </span>
 <span class="pl-k">extern</span> <span class="pl-s">"C"</span> {
     <span class="pl-k">fn</span> <span class="pl-en">syscall</span>(nr: <span class="pl-k">usize</span>, a1: <span class="pl-k">usize</span>, a2: <span class="pl-k">usize</span>, a3: <span class="pl-k">usize</span>, a4: <span class="pl-k">usize</span>, a5: <span class="pl-k">usize</span>);
