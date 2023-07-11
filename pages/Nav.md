@@ -13,4 +13,6 @@ I made things easier for myself and made navigation happen through this md-page 
 - [This page](/meta)
 - [Pgwm03](/pgwm03)
 - [Boot](/boot)
+- [Pgwm04](/pgwm04)
+- [Threads](/threads)
 - [Test](/test)
