@@ -13,10 +13,10 @@ using the stable toolchain, I'm going to write a bit about the way there.
 that allows you to submit io-tasks, and later collect the results of those tasks.
 It does so by providing two ring buffers, one for submissions, and one for completions.
 
-In the simplest possible terms you put some tasks on one queue, and later collect them on some other
+In the simplest possible terms, you put some tasks on one queue, and later collect them on some other
 queue. In practice, it's a lot less simple than that.
 
-As I've written about in previous entries on this page, I decided to scrap the std-lib and `libc`, and write
+As I've written about in previous entries on this website, I decided to scrap the std-lib and `libc`, and write
 my own syscall interface in [tiny-std](https://github.com/MarcusGrass/tiny-std).  
 Therefore I had to look into the gritty details of how to set up these buffers, you can see those details
 [here](https://github.com/MarcusGrass/tiny-std/blob/e48179de9f11e687e5f523bb2f271b7c3bb71175/rusl/src/io_uring.rs).
@@ -25,7 +25,7 @@ Or, look at the c-implementation which I ripped off [here](https://github.com/ax
 ### Why io-uring?
 
 I've written before about my x11-wm [pgwm](https://github.com/MarcusGrass/pgwm), but in short:
-An x11-wm is based on async socket communication where the wm-reacts to incoming messages, like a key-press, and
+It's an x11-wm is based on async socket communication where the wm-reacts to incoming messages, like a key-press, and
 responds with some set of outgoing messages on that same socket.  
 When the WM had nothing to do it used the `poll` interface to await another message.
 
@@ -56,19 +56,19 @@ There are more considerations than that, but I didn't really need to tackle most
 a production-ready lib that I'll support indefinitely, I'm just messing around with my WM. I cranked up the buffer
 size to more than necessary, and it works fine.
 
-Something that I did consider however, was whether to use SQ-poll.
+Something that I did consider however, was whether to use `SQ-poll`, we'll get more into that and what that is.
 
 ### Sharing memory with the kernel
 
 Something that theoretically makes Io-uring more efficient than other io-alternatives is that the ring-buffers
 are shared with the kernel. There is no need to make a separate syscall for each sent message, if you put a message
 on the buffer, and update its offset through an atomic operation, that will be available for the kernel to use.  
-But the kernel does need to find out about the submission, outside of just the updated state.
+But the kernel does need to find out about the submission outside of just the updated state.
 There are two ways of doing this:
 
 1. Make a syscall. Write an arbitrary amount of tasks to the submission queue, then tell the kernel about them through
    a syscall. That same syscall can be used to wait until there are completions available as well, it's very flexible.
-2. Have the kernel poll the shared memory for changes, in the offset and pick tasks up as they're added. Potentially,
+2. Have the kernel poll the shared memory for changes in the queue-offset and pick tasks up as they're added. Potentially,
    this is a large latency-decrease as well as a throughput increase, no more waiting for syscalls!
 
 I thought this sounded great, in practice however, `SQPoll` resulted in a massive cpu-usage increase. I couldn't
@@ -77,7 +77,7 @@ In the end io-uring didn't change much about pgwm.
 
 ## Stable
 
-Since I ripped out `libc` the pgwm has required nightly to build, this has bothered me quite a bit.
+Since I ripped out `libc`, pgwm has required nightly to build, this has bothered me quite a bit.
 The reason that the nightly compiler was necessary was because of `tiny-std` using the `#[naked]` feature to create
 the assembly entrypoint (`_start` function), where the application starts execution.
 
@@ -155,7 +155,7 @@ The solution to the missing symbols is simple enough, these symbols are provided
 that require nightly. So I copied the implementation (and license), removing dependencies on nightly features, and
 exposed the symbols in `tiny-std`.
 
-Now an application (like pgwm), can be built with the stable toolchain.
+Now an application (like pgwm), can be built with the stable toolchain using `tiny-std`.
 
 ## Static
 
@@ -222,14 +222,15 @@ Section Headers:
        00000000000000a8  0000000000000000           0     0     1
 ```
 
-Both `file` and `readelf` shows that this binary needs an interpreter, that being
+Both `file` and `readelf` (`.interp` section) shows that this binary needs an interpreter, that being
 `/lib64/ld-linux-x86-64.so.2`. If the binary is run in an environment without it, it
 will immediately crash.
 
 If compiled statically with `RUSTFLAGS='-C target-feature=+crt-static'` the application segfaults, oof.
 
-I haven't found out the reason why `tiny-std` cannot run as a position-independent executable,
-or I know why, all the addresses to symbols are wrong (like static variables) are wrong. What I don't know yet is
+I haven't found out the reason why `tiny-std` cannot run as a
+[position-independent](https://en.wikipedia.org/wiki/Position-independent_code) executable,
+or I know why, all the addresses to symbols (like static variables) are wrong. What I don't know yet is
 how to fix it.
 
 There is a no-code way of fixing it though: `RUSTFLAGS='-C target-feature=+crt-static -C relocation-model=static'`.  

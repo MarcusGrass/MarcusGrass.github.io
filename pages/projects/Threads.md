@@ -3,12 +3,12 @@ Lately I've been thinking about adding threads to [tiny-std](https://github.com/
 my linux-only `x86_64`/`aarch64`-only tiny standard library for [Rust](https://github.com/rust-lang/rust).  
 
 Now I've finally done that, with some jankiness, in this write-up I'll 
-go through that process a bit.
+go through that process.
 
 ## Parallelism
 
 Sometimes in programming, [parallelism](https://en.wikipedia.org/wiki/Parallel_computing) (doing multiple things at the 
-same time), is desirable. For example, to complete some task, two different long-running calculations have to be made. 
+same time), is desirable. For example, to complete some task two different long-running calculations have to be made. 
 If those can be run in parallel, our latency becomes that of the slowest of those tasks (plus some overhead).  
 
 Some ways of achieving parallelism in your program are:
@@ -28,7 +28,7 @@ and achieve parallelism that way.
 Threads from a programming perspective, are managed by the OS, how threads work is highly OS-dependent. I'll 
 only go into `Linux` specifically here, and only from an api-consumers perspective.
 
-### Spawning a minimal task
+### Spawning a thread with a minimal task
 In the rust std-library, a thread can be spawned with 
 ```rust
 fn main() {
@@ -68,14 +68,14 @@ Right away I can tell that calling this is not going to be easy from `Rust`, we'
 2. Varargs are not readable (objectively true opinion).
 
 Skipping down to the `Notes`-section of the documentation shows the actual syscall interface (for `x86_64` in a 
-conspiracy to ruin my life, the last args are switched on `aarch64`):
+conspiracy to ruin my life, the last two args are switched on `aarch64`):
 ```c
 long clone(unsigned long flags, void *stack,
                       int *parent_tid, int *child_tid,
                       unsigned long tls);
 ```
 
-Very disconcerting, since the `C`-api which accepts varargs, seems to do quite a bit of work before making a syscall, 
+Very disconcerting, since the `C`-api which accepts varargs, seems to do quite a bit of work before making the syscall, 
 handing over a task to the OS.  
 
 In simple terms, clone is a way to "clone" the current process. If you have experience with
@@ -103,7 +103,7 @@ What happens immediately after this call, is that our process is cloned and star
 
 ```Rust
 fn parallelism_through_multiprocess() {
-    let pid = rusl::process::clone().unwrap();
+    let pid = unsafe { rusl::process::fork().unwrap() };
     if pid == 0 {
         println!("In child!");
         rusl::process::exit(0);
@@ -123,8 +123,8 @@ then exited that process. At the same time, our caller returns as usual, only st
 Achieving parallelism in this way can be fine. If you want to run a command, `forking`/`cloning` then executing 
 another binary through the [execve-syscall](https://man7.org/linux/man-pages/man2/execve.2.html)
 is usually how that's done.  
-Multiprocessing can be a bad choice if the task is small, because setting up an entire other process can be costly 
-on resources, and communicating between processes can be slower than communicating through shared memory.  
+Multiprocessing can be a bad choice if the task is small, because setting up an entire other process can be resource 
+intensive, and communicating between processes can be slower than communicating through shared memory.  
 
 ### Threads: Cloning intra-process with shared memory
 What we think of as threads in linux are sometimes called 
@@ -157,14 +157,15 @@ share memory space and can modify each-other's memory.
 6. `CLONE_SYSVSEM`, the parent and child shares semaphores.
 7. `CLONE_CHILD_CLEARTID`, wake up waiters for the supplied `child_tid` futex pointer when the child exits 
 (we'll get into this).
-8. `CLONE_SETTLS`, set the thread-local storage to the data pointed at by the `tls`-variable (architecture specific).
+8. `CLONE_SETTLS`, set the thread-local storage to the data pointed at by the `tls`-variable (architecture specific,
+we'll get into this as well).
 
 The crucial flags to run some tasks in a thread are only:
 
 1. `CLONE_VM`
 2. `CLONE_THREAD`
 
-The rest are for usability and expectation reasons, as well as cleanup reasons.  
+The rest are for usability and expectation, as well as cleanup reasons.  
 
 
 ## Implementation
@@ -172,7 +173,7 @@ Now towards the actual implementation of a minimal threading API.
 
 ### API expectation
 
-The std library in `Rust` provides an interface that is used like this:
+The std library in `Rust` provides an interface that could be used like this:
 ```rust
 let join_handle = std::thread::spawn(|| println!("Hello from my thread!"));
 join_handle.join().unwrap();
@@ -222,22 +223,22 @@ reasonable thread-usage is valid. `Rust`'s default thread stack size is `2MiB`. 
 
 Keeping threads on the main-thread's stack, significantly reduces our memory availability, along with the risk of chaos.  
 
-There is a case to be made for some very specific application which spawns some threads in scope, do some work, then exits, 
+There is a case to be made for some very specific application which spawns some threads in scope, does some work, then exits, 
 to reuse the caller's stack. But I have yet to encounter that kind of use-case in practice, let's move on to something 
 more reasonable.  
 
 ##### Mmap more stack-space
 
 This is what `musl` does. We allocate the memory that we want to use from new os-pages and use those.  
-We could potentially do a regular `malloc` as well, although that would less control over the allocated memory.  
+We could potentially do a regular `malloc` as well, although that would mean less control over the allocated memory.  
 
 #### Communicating with the started thread
-Now `mmap`-ing some stack-memory be enough for the OS to start a thread with its own stack, but then what?  
+Now `mmap`-ing some stack-memory is enough for the OS to start a thread with its own stack, but then what?  
 The thread needs to know what to do, we can't provide it with any arguments, we need to put all the data it needs 
-on its stack.  
+on its stack before starting execution of the task.  
 
 This means that we'll need some assembly, since using the clone syscall and then continuing in `Rust` relinquishes 
-control over the stack that we need, we need to put almost the entire child-thread's lifetime in assembly.  
+control that we need over the stack, we need to put almost the entire child-thread's lifetime in assembly.  
 
 The structure of the call is mostly stolen from `musl`, with some changes for this more minimal use-case.
 The rust function will look like this:
@@ -257,23 +258,23 @@ extern "C" {
 }
 ```
 
-It takes a pointer to a `start_fn`, which is a `C` calling convention function pointer, where our thread will pick up.
-It also takes a pointer to the stack, `stack_ptr`.
-It takes clone-flags which we send onto the OS in the syscall.  
-It takes an `args_ptr`, which is the closure we want to run, converted to a `C` calling convention function pointer.  
-It takes a `tls_ptr`, a pointer to some thread local storage, which we'll need to deallocate the thread's stack, and 
-communicate with the calling thread.  
-It takes a `child_tid_ptr`, which will be used to synchronize with the calling thread.  
-It takes a `stack_unmap_ptr`, which is the base address that we allocated for the stack at its original `0` offset.  
-It takes the `stack_sz`, stack-size, which we'll need to deallocate the stack later.
+1. It takes a pointer to a `start_fn`, which is a `C` calling convention function pointer, where our thread will pick up.
+2. It also takes a pointer to the stack, `stack_ptr`.
+3. It takes clone-flags which we send onto the OS in the syscall.
+4. It takes an `args_ptr`, which is the closure we want to run, converted to a `C` calling convention function pointer.
+5. It takes a `tls_ptr`, a pointer to some thread local storage, which we'll need to deallocate the thread's stack, and 
+communicate with the calling thread.
+6. It takes a `child_tid_ptr`, which will be used to synchronize with the calling thread.
+7. It takes a `stack_unmap_ptr`, which is the base address that we allocated for the stack at its original `0` offset.
+8. It takes the `stack_sz`, stack-size, which we'll need to deallocate the stack later.
 
 #### Syscalls
 `x86_64` and `aarch64` assembly has a command to execute a `syscall`.
 
 A syscall is like a function call to the kernel, we'll need to make three syscalls using assembly:
-1. CLONE nr 56 on `x86_64`
-2. MUNMAP nr 11 on `x86_64`
-3. EXIT nr 60 on `x86_64`
+1. CLONE, nr 56 on `x86_64`
+2. MUNMAP, nr 11 on `x86_64`
+3. EXIT, nr 60 on `x86_64`
 
 The interface for the syscall is as follows:
 
@@ -286,7 +287,7 @@ The interface for the syscall is as follows:
 /// - a3 -> x86: rdx, aarch64: x2
 /// - a4 -> x86: r10, aarch64: x3
 /// - a5 -> x86: r8,  aarch64: x4
-/// Pseudo: 
+/// Pseudocode syscall as extern function: 
 extern "C" {
     fn syscall(nr: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize);
 }
@@ -391,7 +392,7 @@ for the process to complete, but there is another way, alluded to in the note on
 
 #### Futex messaging
 If `CLONE_CHILD_CLEARTID` is supplied in clone-flags along with a pointer to a futex variable, something with a `u32`-layout 
-in `Rust`, most reasonably `AtomicU32`, then the OS will set that futex-value to `0` (not null) when the thread exits, 
+in `Rust` that's most reasonably `AtomicU32`, then the OS will set that futex-value to `0` (not null) when the thread exits, 
 successfully or not.  
 
 This means that if the caller wants to `join`, i.e. blocking-wait for the child-thread to finish, it can use the 
@@ -399,14 +400,15 @@ This means that if the caller wants to `join`, i.e. blocking-wait for the child-
 
 #### Getting the returned value
 The return value is fairly simple, we need to allocate space for it, for example with a pointer to an `UnsafeCell<Option<T>>`, 
-and then have the child-thread update it. The catch here is that we can't have references to that value while the child-thread
-may be writing to it, since that's `UB`. Therefore, we need to be absolutely certain that the child-thread is done with 
+and then have the child-thread update it. The catch here is that we can't have `&`-references to that value while the child-thread
+may be writing to it, since that's `UB`. We share a pointer with the child containing the value, and we need to be 
+absolutely certain that the child-thread is done with 
 its modification before we try to read it. For example by waiting for it to exit by `join`-ing.
 
 
 ### Memory leaks, who deallocates what?
 We don't necessarily have to keep our `JoinHandle<T>` around after spawning a thread. A perfectly valid use-case is to 
-just spawn some long-running task and then forget about it, this causes a problem, if the calling thread doesn't have 
+just spawn some long-running thread and then forget about it, this causes a problem, if the calling thread doesn't have 
 sole responsibility of deallocating the shared memory (the `futex` variable, and the return value), then we need a way 
 to signal to the child-thread that it's that thread's responsibility to deallocate those variables before exiting.
 
@@ -417,7 +419,7 @@ Now there are three deallocation-scenarios:
 1. Caller joins the child thread by waiting for the `futex`-variable to change value to `0`.
 In this case the caller deallocates the `futex`, takes the return value of the heap freeing its memory, and 
 deallocates the `should_dealloc` pointer.
-2. Caller drops the `JoinHandle<T>`. This is racy, we need to read `should_dealloc` to see that the childthread hasn't 
+2. Caller drops the `JoinHandle<T>`. This is racy, we need to read `should_dealloc` to see that the child thread hasn't 
 already completed its work. If it has, we wait on the `futex` to make sure the child thread is completely done, then 
 deallocate as above.
 3. The child thread tries to set `should_dealloc` to `true` and fails, meaning that the calling thread has already 
@@ -426,6 +428,7 @@ to be updated on thread exit through the
 [set_tid_address-syscall](https://man7.org/linux/man-pages/man2/set_tid_address.2.html) (forgetting to do this results in a 
 use after free, oof. Here's a `Linux`-code-comment calling me a dumbass that I found when trying to find the source of the segfaults:
 ```c
+// 929ed21dfdb6ee94391db51c9eedb63314ef6847, kernel/fork.c#L1634, written by Linus himself
 if (tsk->clear_child_tid) {
 		if (atomic_read(&mm->mm_users) > 1) {
 			/*
@@ -444,9 +447,12 @@ if (tsk->clear_child_tid) {
 
 ### Oh, right. Panics...
 I imagine a world where `Rust` doesn't contain panics. Sadly, we don't live in that world, and thus we need to handle them.  
-If the thread panics after the caller has dropped the `JoinHandle<T>` the shared memory is leaked, and the stack isn't deallocated.  
+If the thread panics, and we try to join then it's no issue, we'll get a `None` return value, and can continue with 
+the regular cleanup from the caller.  
+However, if the thread panics after the caller has dropped the `JoinHandle<T>` the shared memory is leaked, 
+and the stack isn't deallocated.  
 
-Rusts panic handler could like this: 
+A `Rust` panic handler could like this: 
 
 ```rust
 /// Dummy panic handler
@@ -518,15 +524,15 @@ fn get_tls_ptr() -> *mut ThreadLocalStorage {
 ```
 
 This takes us to another of our clone-flags `CLONE_SETTLS`, we can now allocate and supply a pointer to a 
-`ThreadLocalStorage`-struct, and that will be put into the thread's thread-local storage register, which registers are 
-used can be seen in `get_tls_ptr`.  
+`ThreadLocalStorage`-struct, and that will be put into the thread's thread-local storage register by the OS, 
+which registers are used can be seen in `get_tls_ptr`.  
 
 Now when entering the `panic_handler` we can `get_tls_ptr` and see if there is a `ThreadDealloc` associated with the 
 thread that's currently panicking. If there isn't, we're on the main thread, and we'll just bail out by exiting with 
 code `1`, terminating the program.
-If there is a `ThreadDealloc` we can now first check what the caller is doing, and if we have exclusive access 
-to the shared memory, if we do we deallocate it, if we don't we let the caller handle it. Then again we 
-have to exit with some asm:
+If there is a `ThreadDealloc` we can now first check if the caller has dropped the `JoinHandle<T>`, 
+and if we have exclusive access to the shared memory, if we do have exclusive access we deallocate it, 
+if we don't we let the caller handle it. Then, again we have to exit with some asm:
 
 ```Rust 
 // We need to be able to unmap the thread's own stack, we can't use the stack anymore after that
@@ -553,7 +559,7 @@ options(nostack, noreturn)
 ```
 
 We also need to remember to deallocate the `ThreadLocalStorage`, what we keep in the register is just a pointer to 
-that allocated heap-memory. Both in successful, and panicking thread-exits.
+that allocated heap-memory. This needs to be done both in successful and panicking thread-exits.
 
 ## Final thoughts
 I've been dreading reinventing this particular wheel, but I'm glad I did. 
@@ -566,4 +572,7 @@ With a huge amount of comments its 500 lines.
 I believe that it doesn't contain `UB` or leakage, but it's incredibly hard to test, what I know is lacking is signal 
 handling, which is something else that I have been dreading getting into.
 
-Thanks for reading!
+## Next up
+I've ordered a Pinephone explorer edition, I'll probably try doing stuff with that next.
+
+## Thanks for reading!
