@@ -8,7 +8,7 @@ const HOME_LABEL: &str = "Home";
 const NAV: LocationInfo = LocationInfo::new("/table-of-contents", "Nav");
 const NAV_LABEL: &str = "Table of contents";
 const NOT_FOUND: LocationInfo = LocationInfo::new("/not-found", "NotFound");
-const LOCATIONS: [LocationInfo; 9] = [
+const LOCATIONS: &[LocationInfo] = &[
     HOME,
     NAV,
     NOT_FOUND,
@@ -17,6 +17,7 @@ const LOCATIONS: [LocationInfo; 9] = [
     LocationInfo::new("/boot", "Boot"),
     LocationInfo::new("/pgwm04", "Pgwm04"),
     LocationInfo::new("/threads", "Threads"),
+    LocationInfo::new("/static-pie", "StaticPie"),
     LocationInfo::new("/test", "Test"),
 ];
 

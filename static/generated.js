@@ -7,6 +7,7 @@ const Location = Object.freeze({
 	BOOT: {"path": "/boot", "name": "Boot"},
 	PGWM04: {"path": "/pgwm04", "name": "Pgwm04"},
 	THREADS: {"path": "/threads", "name": "Threads"},
+	STATICPIE: {"path": "/static-pie", "name": "StaticPie"},
 	TEST: {"path": "/test", "name": "Test"},
 });
 
@@ -46,10 +47,11 @@ I made things easier for myself and made navigation happen through this md-page 
 <h2>Projects</h2>
 <ul>
 <li><a class="self-link" onclick=page_navigate("/meta")>This page</a></li>
-<li><a class="self-link" onclick=page_navigate("/pgwm03")>Pgwm03</a></li>
-<li><a class="self-link" onclick=page_navigate("/boot")>Boot</a></li>
-<li><a class="self-link" onclick=page_navigate("/pgwm04")>Pgwm04</a></li>
-<li><a class="self-link" onclick=page_navigate("/threads")>Threads</a></li>
+<li><a class="self-link" onclick=page_navigate("/pgwm03")>Pgwm03 - nostd - nolibc window manager</a></li>
+<li><a class="self-link" onclick=page_navigate("/boot")>Boot - Writing a tiny bootloader</a></li>
+<li><a class="self-link" onclick=page_navigate("/pgwm04")>Pgwm04 - Wm runs on stable, uses io_uring</a></li>
+<li><a class="self-link" onclick=page_navigate("/threads")>Threads - Tiny-std has threading support</a></li>
+<li><a class="self-link" onclick=page_navigate("/static-pie")>Static pie - Tiny-std can compile as static-pie</a></li>
 <li><a class="self-link" onclick=page_navigate("/test")>Test</a></li>
 </ul>
 </div>`;
@@ -951,6 +953,307 @@ position independent.</p>
 <p>I'm tentatively looking into making threading work, but that is a lot of work and a
 lot of segfaults on the way.</p>
 </div>`;
+const STATICPIE_HTML = String.raw`<div class="markdown-body"><h1>Static pie linking a nolibc Rust binary</h1>
+<p>Something has been bugging me for a while with <a href="https://github.com/MarcusGrass/tiny-std">tiny-std</a>,
+if I try to compile executables created with them as <code>-C target-feature=+crt-static</code> (statically link the <code>C</code>-runtime),
+it segfaults.</p>
+<p>The purpose of creating <code>tiny-std</code> was to avoid <code>C</code>, but to get <code>Rust</code> to link a binary statically, that flag needs
+to be passed. <code>-C target-feature=+crt-static -C relocation-model=pie</code> does produce a valid binary though, so
+something about <code>PIE</code>-executables created with <code>tiny-std</code> fails, in this writeup I'll go into the solution for that.</p>
+<h2>Static pie linking</h2>
+<p>Static pie linking is a combination of two concepts.</p>
+<ol>
+<li>Static linking, putting everything in the same place. As opposed to dynamic linking, where library dependencies
+can be found and used at runtime. Statically linking an executable gives it the property that it can be run on any system
+that can handle the executable type, i.e. I can start a statically linked elf-executable on any platform that can run
+elf-executables. Whereas a dynamically linked executable will not start if its dynamic dependencies cannot be found
+at start.</li>
+<li><a href="https://en.wikipedia.org/wiki/Position-independent_code">Position-independent code</a> position-independent code
+is able to run properly regardless of where in memory is placed. The benefit, as I understand it, is security-related.</li>
+</ol>
+<p>When telling <code>rustc</code> to create a static pie linked executable through <code>-C target-feature=+crt-static -C relocation-model=pie</code>
+(relocation-model defaults to pie, could be omitted), it creates an elf-executable which has a header that marks it as
+<code>DYN</code>. Here's what an example <code>readelf -h</code> looks like:</p>
+<div class="highlight highlight-shell"><pre>ELF Header:
+  Magic:   7f 45 4c 46 02 01 01 00 00 00 00 00 00 00 00 00 
+  Class:                             ELF64
+  Data:                              2<span class="pl-s"><span class="pl-pds">'</span>s complement, little endian</span>
+<span class="pl-s">  Version:                           1 (current)</span>
+<span class="pl-s">  OS/ABI:                            UNIX - System V</span>
+<span class="pl-s">  ABI Version:                       0</span>
+<span class="pl-s">  Type:                              DYN (Position-Independent Executable file)</span>
+<span class="pl-s">  Machine:                           Advanced Micro Devices X86-64</span>
+<span class="pl-s">  Version:                           0x1</span>
+<span class="pl-s">  Entry point address:               0x24b8</span>
+<span class="pl-s">  Start of program headers:          64 (bytes into file)</span>
+<span class="pl-s">  Start of section headers:          1894224 (bytes into file)</span>
+<span class="pl-s">  Flags:                             0x0</span>
+<span class="pl-s">  Size of this header:               64 (bytes)</span>
+<span class="pl-s">  Size of program headers:           56 (bytes)</span>
+<span class="pl-s">  Number of program headers:         9</span>
+<span class="pl-s">  Size of section headers:           64 (bytes)</span>
+<span class="pl-s">  Number of section headers:         32</span>
+<span class="pl-s">  Section header string table index: 20</span>
+</pre></div>
+<p>This signals to the OS that the executable can be run position-independently, but since <code>tiny-std</code> assumes that
+memory addresses are absolute, the ones they were when compiled, the executable segfaults as soon as it tries to use
+any relocated data, like functions or static variables.</p>
+<h2>Where are my symbols?</h2>
+<p>This seems like a tricky problem, as a programmer, I have a bunch of variable and function calls, some that the
+<code>Rust</code>-language emits for me, now each of the addresses for those variables and functions are in another place.<br>
+Before using any of them, I need to do the remapping, which means that this needs to occur before using any functions (kinda).</p>
+<h2>The start function</h2>
+<p>The executable enters through the <code>_start</code> function, this is defined in <code>asm</code> for <code>tiny-std</code>:</p>
+<div class="highlight highlight-rust"><pre><span class="pl-c">// Binary entrypoint</span>
+#[cfg(all(feature = <span class="pl-s">"symbols"</span>, feature = <span class="pl-s">"start"</span>, target_arch = <span class="pl-s">"x86_64"</span>))]
+core<span class="pl-k">::</span>arch<span class="pl-k">::</span><span class="pl-en">global_asm!</span>(
+    <span class="pl-s">".text"</span>,
+    <span class="pl-s">".global _start"</span>,
+    <span class="pl-s">".type _start,@function"</span>,
+    <span class="pl-s">"_start:"</span>,
+    <span class="pl-s">"xor rbp,rbp"</span>, <span class="pl-c">// Zero the stack-frame pointer</span>
+    <span class="pl-s">"mov rdi, rsp"</span>, <span class="pl-c">// Move the stack pointer into rdi, c-calling convention arg 1</span>
+    <span class="pl-s">".weak _DYNAMIC"</span>, <span class="pl-c">// Elf dynamic symbol</span>
+    <span class="pl-s">".hidden _DYNAMIC"</span>,
+    <span class="pl-s">"lea rsi, [rip + _DYNAMIC]"</span>, <span class="pl-c">// Load the dynamic address off the next instruction to execute incremented by _DYNAMIC into rsi</span>
+    <span class="pl-s">"and rsp,-16"</span>, <span class="pl-c">// Align the stack pointer</span>
+    <span class="pl-s">"call __proxy_main"</span> <span class="pl-c">// Call our rust start function</span>
+);
+</pre></div>
+<p>The assembly prepares the stack by aligning it, putting the stack pointer into arg1 for the coming function-call,
+then adds the offset off <code>_DYNAMIC</code> to the special purpose <code>rip</code>-register address, and puts that in <code>rsi</code> which becomes
+our called functions arg 2.</p>
+<p>Then we call <code>__proxy_main</code>, the signature looks like this:</p>
+<p><code>unsafe fn __proxy_main(stack_ptr: *const u8, dynv: *const usize)</code>
+It takes the <code>stack_ptr</code> and the <code>dynv</code>-dynamic vector as arguments, which we provided in
+the above assembly.</p>
+<p>I wrote more about the <code>_start</code>-function in <a class="self-link" onclick=page_navigate("/pgwm03")>pgwm03</a> and <a href="https://fasterthanli.me/series/making-our-own-executable-packer/part-12">fasterthanli.me</a>
+wrote more about it at their great blog, but in short:</p>
+<p>Before running the user's <code>main</code> we need to set up some stuff, like arguments, environment variables, <a href="https://man7.org/linux/man-pages/man3/getauxval.3.html">aux-values</a>,
+map in faster functions from the vdso (see <a class="self-link" onclick=page_navigate("/pgwm03")>pgwm03</a> for more on that), and set up some thread-state,
+see <a class="self-link" onclick=page_navigate("/threads")>the thread writeup</a> for that.</p>
+<p>All these variables come off the executable's stack, which is why we need to pass the stack pointer as an argument to
+our setup-function, so that we can use it before we start polluting the stack.</p>
+<p>The first extraction looks like this:</p>
+<div class="highlight highlight-rust"><pre>#[no_mangle]
+#[cfg(all(feature = <span class="pl-s">"symbols"</span>, feature = <span class="pl-s">"start"</span>))]
+<span class="pl-k">unsafe</span> <span class="pl-k">fn</span> <span class="pl-en">__proxy_main</span>(stack_ptr: <span class="pl-k">*const</span> <span class="pl-k">u8</span>, dynv: <span class="pl-k">*const</span> <span class="pl-k">usize</span>) {
+    <span class="pl-c">// Fist 8 bytes is a u64 with the number of arguments</span>
+    <span class="pl-k">let</span> argc <span class="pl-k">=</span> <span class="pl-k">*</span>(stack_ptr <span class="pl-k">as</span> <span class="pl-k">*const</span> <span class="pl-k">u64</span>);
+    <span class="pl-c">// Directly followed by those arguments, bump pointer by 8 bytes</span>
+    <span class="pl-k">let</span> argv <span class="pl-k">=</span> stack_ptr.<span class="pl-en">add</span>(<span class="pl-c1">8</span>) <span class="pl-k">as</span> <span class="pl-k">*const</span> <span class="pl-k">*const</span> <span class="pl-k">u8</span>;
+    <span class="pl-k">let</span> ptr_size <span class="pl-k">=</span> core<span class="pl-k">::</span>mem<span class="pl-k">::</span><span class="pl-en">size_of</span><span class="pl-k">::</span>&#x3C;<span class="pl-k">usize</span>>();
+    <span class="pl-c">// Directly followed by a pointer to the environment variables, it's just a null terminated string.</span>
+    <span class="pl-c">// This isn't specified in Posix and is not great for portability, but we're targeting Linux so it's fine</span>
+    <span class="pl-k">let</span> env_offset <span class="pl-k">=</span> <span class="pl-c1">8</span> <span class="pl-k">+</span> argc <span class="pl-k">as</span> <span class="pl-k">usize</span> <span class="pl-k">*</span> ptr_size <span class="pl-k">+</span> ptr_size;
+    <span class="pl-c">// Bump pointer by combined offset</span>
+    <span class="pl-k">let</span> envp <span class="pl-k">=</span> stack_ptr.<span class="pl-en">add</span>(env_offset) <span class="pl-k">as</span> <span class="pl-k">*const</span> <span class="pl-k">*const</span> <span class="pl-k">u8</span>;
+    <span class="pl-k">let</span> <span class="pl-k">mut</span> null_offset <span class="pl-k">=</span> <span class="pl-c1">0</span>;
+    <span class="pl-k">loop</span> {
+        <span class="pl-k">let</span> val <span class="pl-k">=</span> <span class="pl-k">*</span>(envp.<span class="pl-en">add</span>(null_offset));
+        <span class="pl-k">if</span> val <span class="pl-k">as</span> <span class="pl-k">usize</span> <span class="pl-k">==</span> <span class="pl-c1">0</span> {
+            <span class="pl-k">break</span>;
+        }
+        null_offset <span class="pl-k">+=</span> <span class="pl-c1">1</span>;
+    }
+    <span class="pl-c">// We now know how long the envp is</span>
+    <span class="pl-c">// ... </span>
+}
+</pre></div>
+<p>This works all the same as a <code>pie</code> because:</p>
+<h2>Prelude, inline</h2>
+<p>We will only run into troubles when trying to access an address contained in the binary, such as a function call.<br>
+Up to here that hasn't been a problem, because even though we invoke <code>ptr::add()</code> and <code>core::mem:size_of::&#x3C;T>()</code> we don't
+need any addresses. This is because of inlining.</p>
+<p>Looking att <code>core::mem::size_of&#x3C;T>()</code>:</p>
+<div class="highlight highlight-rust"><pre>#[inline(always)]
+#[must_use]
+#[stable(feature = <span class="pl-s">"rust1"</span>, since = <span class="pl-s">"1.0.0"</span>)]
+#[rustc_promotable]
+#[rustc_const_stable(feature = <span class="pl-s">"const_mem_size_of"</span>, since = <span class="pl-s">"1.24.0"</span>)]
+#[cfg_attr(not(test), rustc_diagnostic_item = <span class="pl-s">"mem_size_of"</span>)]
+<span class="pl-k">pub</span> <span class="pl-k">const</span> <span class="pl-k">fn</span> <span class="pl-en">size_of</span>&#x3C;T>() -> <span class="pl-k">usize</span> {
+    intrinsics<span class="pl-k">::</span><span class="pl-en">size_of</span><span class="pl-k">::</span>&#x3C;T>()
+}
+</pre></div>
+<p>it has <code>#[inline(always)]</code>, the same goes for <code>ptr::add()</code>. Since that code is inlined, we don't need to have an address
+to a function and thus works even though all of our addresses are off.</p>
+<p>To be able to debug function addresses, I would like to print them, since I haven't been able to hook a debugger up
+to <code>tiny-std</code> executables yet. But, printing to the terminal requires code, code that usually isn't <code>#[inline(always)]</code>.</p>
+<p>So I wrote a small print:</p>
+<div class="highlight highlight-rust"><pre>#[inline(always)]
+<span class="pl-k">unsafe</span> <span class="pl-k">fn</span> <span class="pl-en">print_labeled</span>(msg: <span class="pl-k">&#x26;</span>[<span class="pl-k">u8</span>], val: <span class="pl-k">usize</span>) {
+<span class="pl-en">print_label</span>(msg);
+<span class="pl-en">print_val</span>(val);
+}
+#[inline(always)]
+<span class="pl-k">unsafe</span> <span class="pl-k">fn</span> <span class="pl-en">print_label</span>(msg: <span class="pl-k">&#x26;</span>[<span class="pl-k">u8</span>]) {
+<span class="pl-en">syscall!</span>(WRITE, <span class="pl-c1">1</span>, msg.<span class="pl-en">as_ptr</span>(), msg.<span class="pl-en">len</span>());
+}
+#[inline(always)]
+<span class="pl-k">unsafe</span> <span class="pl-k">fn</span> <span class="pl-en">print_val</span>(u: <span class="pl-k">usize</span>) {
+<span class="pl-en">syscall!</span>(WRITE, <span class="pl-c1">1</span>, <span class="pl-en">num_to_digits</span>(u).<span class="pl-en">as_ptr</span>(), <span class="pl-c1">21</span>);
+}
+#[inline(always)]
+<span class="pl-k">unsafe</span> <span class="pl-k">fn</span> <span class="pl-en">num_to_digits</span>(<span class="pl-k">mut</span> u: <span class="pl-k">usize</span>) -> [<span class="pl-k">u8</span>; <span class="pl-c1">21</span>] {
+    <span class="pl-k">let</span> <span class="pl-k">mut</span> base <span class="pl-k">=</span> <span class="pl-k">*</span><span class="pl-s">b"<span class="pl-cce">\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\n</span>"</span>;
+    <span class="pl-k">let</span> <span class="pl-k">mut</span> ind <span class="pl-k">=</span> base.<span class="pl-en">len</span>() <span class="pl-k">-</span> <span class="pl-c1">2</span>;
+    <span class="pl-k">if</span> u <span class="pl-k">==</span> <span class="pl-c1">0</span> {
+        base[ind] <span class="pl-k">=</span> <span class="pl-c1">48</span>;
+    }
+    <span class="pl-k">while</span> u <span class="pl-k">></span> <span class="pl-c1">0</span> {
+        <span class="pl-k">let</span> md <span class="pl-k">=</span> u <span class="pl-k">%</span> <span class="pl-c1">10</span>;
+        base[ind] <span class="pl-k">=</span> md <span class="pl-k">as</span> <span class="pl-k">u8</span> <span class="pl-k">+</span> <span class="pl-c1">48</span>;
+        ind <span class="pl-k">-=</span> <span class="pl-c1">1</span>;
+        u <span class="pl-k">=</span> u <span class="pl-k">/</span> <span class="pl-c1">10</span>;
+    }
+    base
+}
+</pre></div>
+<p>Printing to the terminal can be done through the syscall <code>WRITE</code> on <code>fd</code> <code>1</code> (STDOUT).<br>
+It takes a buffer of bytes and a length. The call through <code>syscall!()</code> is always inlined.</p>
+<p>Since I primarily need look at addresses, I just print <code>usize</code>, and I wrote a beautifully stupid number to digits function.<br>
+Since the max digits of a <code>usize</code> on a 64-bit machine is 21, I allocate a slice on the stack filled with
+<code>null</code>-bytes, these won't be displayed. Then add digit by digit, which means that the number is formatted without leading or
+trailing zeroes.</p>
+<p>Invoking it looks like this:</p>
+<div class="highlight highlight-rust"><pre><span class="pl-k">fn</span> <span class="pl-en">test</span>() {
+    <span class="pl-en">print_labeled</span>(<span class="pl-s">b"My msg as bytes: "</span>, <span class="pl-c1">15</span>);
+}
+</pre></div>
+<h2>Relocation</h2>
+<p>Now that debug-printing is possible we can start working on relocating the adresses.</p>
+<p>I previously had written some code the extract <code>aux</code>-values, but now that code needs to run without using any
+non-inlined functions or variables.</p>
+<p>The aux-values were collected and stored pretty sloppily as a global static variable before,
+this time it needs to be collected onto the stack, used for finding the dynamic relocation addresses,
+and then it could be put into a static variable after that.</p>
+<p>We'll also need the <code>dyn</code>-values, which are essentially the same as aux-values, provided for <code>DYN</code>-objects.</p>
+<p>In musl, the aux-values that are put on the stack looks like this:</p>
+<div class="highlight highlight-c"><pre><span class="pl-c1">size_t</span> i, aux[AUX_CNT], dyn[DYN_CNT];
+</pre></div>
+<p>So I replicated the aux-vec on the stack like this:</p>
+<div class="highlight highlight-rust"><pre><span class="pl-c">// There are 32 aux values.</span>
+<span class="pl-k">let</span> <span class="pl-k">mut</span> aux: [<span class="pl-c1">0usize</span>; <span class="pl-c1">32</span>];
+</pre></div>
+<p>And then initialize it, with the <code>aux</code>-pointer provided by the OS.</p>
+<p>The OS-supplies some values in the <code>aux</code>-vector <a href="https://man7.org/linux/man-pages/man3/getauxval.3.html">more info here</a>
+than we'll need:</p>
+<ol>
+<li><code>AT_BASE</code> the base address of the program interpreter, 0 if no interpreter (static-pie).</li>
+<li><code>AT_PHNUM</code>, the number of program headers.</li>
+<li><code>AT_PHENT</code>, the size of one program header entry.</li>
+<li><code>AT_PHDR</code>, the address of the program headers in the executable.</li>
+</ol>
+<p>First we need to find the virtual address found at the program header that has the <code>dynamic</code> type.</p>
+<p>The program header is laid out in memory as this struct:</p>
+<div class="highlight highlight-rust"><pre>#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+<span class="pl-k">pub</span> <span class="pl-k">struct</span> <span class="pl-en">elf64_phdr</span> {
+    <span class="pl-k">pub</span> p_type: Elf64_Word,
+    <span class="pl-k">pub</span> p_flags: Elf64_Word,
+    <span class="pl-k">pub</span> p_offset: Elf64_Off,
+    <span class="pl-k">pub</span> p_vaddr: Elf64_Addr,
+    <span class="pl-k">pub</span> p_paddr: Elf64_Addr,
+    <span class="pl-k">pub</span> p_filesz: Elf64_Xword,
+    <span class="pl-k">pub</span> p_memsz: Elf64_Xword,
+    <span class="pl-k">pub</span> p_align: Elf64_Xword,
+}
+</pre></div>
+<p>We'll treat the address of the <code>AT_PHDR</code> as an array that we could declare as:</p>
+<div class="highlight highlight-rust"><pre><span class="pl-k">let</span> phdr: <span class="pl-k">&#x26;</span>[elf64_phdr; AT_PHNUM] <span class="pl-k">=</span> ...
+</pre></div>
+<p>We can then walk that array until we find a program header struct with <code>p_type</code> = <code>PT_DYNAMIC</code>,
+that program header holds an offset at <code>p_vaddr</code> that we can subtract from the <code>dynv</code> pointer to get
+our correct <code>base</code> address.</p>
+<h2>Initialize the dyn section</h2>
+<p>The <code>dynv</code> pointer supplied by the os, as previously stated, is analogous to the <code>aux</code>-pointer but
+if we try to stack allocate its value mappings on the stack like this:</p>
+<div class="highlight highlight-rust"><pre><span class="pl-k">let</span> dyn_values <span class="pl-k">=</span> [<span class="pl-c1">0usize</span>; <span class="pl-c1">37</span>];
+</pre></div>
+<p>We immediately segfault.</p>
+<h3>SYMBOLS!!!</h3>
+<p>It took me a while to figure out what's happening, when you allocate a zeroed array in rust, and
+that array is larger than <code>[0usize; 32]</code> it instead of using <code>sse</code>, uses <code>memset</code> to zero the memory
+it just took off the stack.</p>
+<p>The asm will look like this:</p>
+<pre><code class="language-asm">        ...
+        mov edx, 296
+        mov rdi, rbx
+        xor esi, esi
+        call qword ptr [rip + memset@GOTPCREL]
+        ...
+</code></pre>
+<p>Accessing that memset symbol is what causes the segfault.<br>
+I tried a myriad of ways to get the compiler to not emit that symbol, among
+<a href="https://users.rust-lang.org/t/reliably-working-around-rust-emitting-memset-when-putting-a-slice-on-the-stack/97080">posting this</a>
+help request.</p>
+<p>It seems that there is no reliable way to avoid <code>rustc</code> emitting unwanted symbols without doing it all in assembly,
+and since that seems a bit much, at least right now, I opted to instead restructure the code.</p>
+<p>The unpacked aux values now look like this:</p>
+<div class="highlight highlight-rust"><pre><span class="pl-c">/// Some selected aux-values, needs to be kept small since they're collected</span>
+<span class="pl-c">/// before symbol relocation on static-pie-linked binaries, which means rustc</span>
+<span class="pl-c">/// will emit memset on a zeroed allocation of over 256 bytes, which we won't be able</span>
+<span class="pl-c">/// to find and thus will result in an immediate segfault on start.</span>
+<span class="pl-c">/// See [docs](https://man7.org/linux/man-pages/man3/getauxval.3.html)</span>
+#[derive(Debug)]
+<span class="pl-k">pub</span>(<span class="pl-k">crate</span>) <span class="pl-k">struct</span> <span class="pl-en">AuxValues</span> {
+    <span class="pl-c">/// Base address of the program interpreter</span>
+    <span class="pl-k">pub</span>(<span class="pl-k">crate</span>) at_base: <span class="pl-k">usize</span>,
+    <span class="pl-c">/// Real group id of the main thread</span>
+    <span class="pl-k">pub</span>(<span class="pl-k">crate</span>) at_gid: <span class="pl-k">usize</span>,
+    <span class="pl-c">/// Real user id of the main thread</span>
+    <span class="pl-k">pub</span>(<span class="pl-k">crate</span>) at_uid: <span class="pl-k">usize</span>,
+    <span class="pl-c">/// Address of the executable's program headers</span>
+    <span class="pl-k">pub</span>(<span class="pl-k">crate</span>) at_phdr: <span class="pl-k">usize</span>,
+    <span class="pl-c">/// Size of program header entry</span>
+    <span class="pl-k">pub</span>(<span class="pl-k">crate</span>) at_phent: <span class="pl-k">usize</span>,
+    <span class="pl-c">/// Number of program headers</span>
+    <span class="pl-k">pub</span>(<span class="pl-k">crate</span>) at_phnum: <span class="pl-k">usize</span>,
+    <span class="pl-c">/// Address pointing to 16 bytes of a random value</span>
+    <span class="pl-k">pub</span>(<span class="pl-k">crate</span>) at_random: <span class="pl-k">usize</span>,
+    <span class="pl-c">/// Executable should be treated securely</span>
+    <span class="pl-k">pub</span>(<span class="pl-k">crate</span>) at_secure: <span class="pl-k">usize</span>,
+    <span class="pl-c">/// Address of the vdso</span>
+    <span class="pl-k">pub</span>(<span class="pl-k">crate</span>) at_sysinfo_ehdr: <span class="pl-k">usize</span>,
+}
+</pre></div>
+<p>It only contains the aux-values that are actually used by <code>tiny-std</code>.</p>
+<p>The dyn-values are only used for relocations so far, so they were packed into this much smaller struct:</p>
+<div class="highlight highlight-rust"><pre><span class="pl-k">pub</span>(<span class="pl-k">crate</span>) <span class="pl-k">struct</span> <span class="pl-en">DynSection</span> {
+    rel: <span class="pl-k">usize</span>,
+    rel_sz: <span class="pl-k">usize</span>,
+    rela: <span class="pl-k">usize</span>,
+    rela_sz: <span class="pl-k">usize</span>,
+}
+</pre></div>
+<p>We can fill that struct with the values from the <code>dynv</code>-pointer, and then finally relocate:</p>
+<div class="highlight highlight-rust"><pre>#[inline(always)]
+<span class="pl-k">pub</span>(<span class="pl-k">crate</span>) <span class="pl-k">unsafe</span> <span class="pl-k">fn</span> <span class="pl-en">relocate</span>(<span class="pl-k">&#x26;</span><span class="pl-c1">self</span>, base_addr: <span class="pl-k">usize</span>) {
+    <span class="pl-c">// Relocate all rel-entries</span>
+    <span class="pl-k">for</span> i <span class="pl-k">in</span> <span class="pl-c1">0</span>..(<span class="pl-c1">self</span>.rel_sz <span class="pl-k">/</span> core<span class="pl-k">::</span>mem<span class="pl-k">::</span><span class="pl-en">size_of</span><span class="pl-k">::</span>&#x3C;Elf64Rel>()) {
+        <span class="pl-k">let</span> rel_ptr <span class="pl-k">=</span> ((base_addr <span class="pl-k">+</span> <span class="pl-c1">self</span>.rel) <span class="pl-k">as</span> <span class="pl-k">*const</span> Elf64Rel).<span class="pl-en">add</span>(i);
+        <span class="pl-k">let</span> rel <span class="pl-k">=</span> <span class="pl-en">ptr_unsafe_ref</span>(rel_ptr);
+        <span class="pl-k">if</span> rel.<span class="pl-c1">0</span>.r_info <span class="pl-k">==</span> <span class="pl-en">relative_type</span>(REL_RELATIVE) {
+            <span class="pl-k">let</span> rel_addr <span class="pl-k">=</span> (base_addr <span class="pl-k">+</span> rel.<span class="pl-c1">0</span>.r_offset <span class="pl-k">as</span> <span class="pl-k">usize</span>) <span class="pl-k">as</span> <span class="pl-k">*mut</span> <span class="pl-k">usize</span>;
+            <span class="pl-k">*</span>rel_addr <span class="pl-k">+=</span> base_addr;
+        }
+    }
+    <span class="pl-c">// Relocate all rela-entries</span>
+    <span class="pl-k">for</span> i <span class="pl-k">in</span> <span class="pl-c1">0</span>..(<span class="pl-c1">self</span>.rela_sz <span class="pl-k">/</span> core<span class="pl-k">::</span>mem<span class="pl-k">::</span><span class="pl-en">size_of</span><span class="pl-k">::</span>&#x3C;Elf64Rela>()) {
+        <span class="pl-k">let</span> rela_ptr <span class="pl-k">=</span> ((base_addr <span class="pl-k">+</span> <span class="pl-c1">self</span>.rela) <span class="pl-k">as</span> <span class="pl-k">*const</span> Elf64Rela).<span class="pl-en">add</span>(i);
+        <span class="pl-k">let</span> rela <span class="pl-k">=</span> <span class="pl-en">ptr_unsafe_ref</span>(rela_ptr);
+        <span class="pl-k">if</span> rela.<span class="pl-c1">0</span>.r_info <span class="pl-k">==</span> <span class="pl-en">relative_type</span>(REL_RELATIVE) {
+            <span class="pl-k">let</span> rel_addr <span class="pl-k">=</span> (base_addr <span class="pl-k">+</span> rela.<span class="pl-c1">0</span>.r_offset <span class="pl-k">as</span> <span class="pl-k">usize</span>) <span class="pl-k">as</span> <span class="pl-k">*mut</span> <span class="pl-k">usize</span>;
+            <span class="pl-k">*</span>rel_addr <span class="pl-k">=</span> base_addr <span class="pl-k">+</span> rela.<span class="pl-c1">0</span>.r_addend <span class="pl-k">as</span> <span class="pl-k">usize</span>;
+        }
+    }
+    <span class="pl-c">// Skip implementing relr-entries for now</span>
+}
+</pre></div>
+<p>After the <code>relocate</code>-section runs, we can again use <code>symbols</code>, and <code>tiny-std</code> can continue with the setup.</p>
+<h2></h2>
+</div>`;
 const TEST_HTML = String.raw`<div class="markdown-body"><h1>Here's a test write-up</h1>
 <p>I always test in prod.</p>
 <div class="highlight highlight-rust"><pre><span class="pl-k">fn</span> <span class="pl-en">main</span>() {
@@ -1495,6 +1798,11 @@ handling, which is something else that I have been dreading getting into.</p>
 			.innerHTML = create_nav_button("Home", "/") + create_nav_button("Table of contents", "/table-of-contents");
 		document.getElementById("content")
 			.innerHTML = THREADS_HTML;
+	} else if (location === Location.STATICPIE.path) {
+		document.getElementById("menu")
+			.innerHTML = create_nav_button("Home", "/") + create_nav_button("Table of contents", "/table-of-contents");
+		document.getElementById("content")
+			.innerHTML = STATICPIE_HTML;
 	} else if (location === Location.TEST.path) {
 		document.getElementById("menu")
 			.innerHTML = create_nav_button("Home", "/") + create_nav_button("Table of contents", "/table-of-contents");

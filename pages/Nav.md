@@ -11,8 +11,9 @@ I made things easier for myself and made navigation happen through this md-page 
 ## Projects
 
 - [This page](/meta)
-- [Pgwm03](/pgwm03)
-- [Boot](/boot)
-- [Pgwm04](/pgwm04)
-- [Threads](/threads)
+- [Pgwm03 - nostd - nolibc window manager](/pgwm03)
+- [Boot - Writing a tiny bootloader](/boot)
+- [Pgwm04 - Wm runs on stable, uses io_uring](/pgwm04)
+- [Threads - Tiny-std has threading support](/threads)
+- [Static pie - Tiny-std can compile as static-pie](/static-pie)
 - [Test](/test)
