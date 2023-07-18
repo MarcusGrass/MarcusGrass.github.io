@@ -566,7 +566,7 @@ I've been dreading reinventing this particular wheel, but I'm glad I did.
 I learnt a lot, and it was interesting to dig into how threading works in practice on `Linux`, plus `tiny-std` now has 
 threads!
 
-The code for threads in tine-std can be found [here](https://github.com/MarcusGrass/tiny-std/blob/main/tiny-std/src/thread/spawn.rs).
+The code for threads in tiny-std can be found [here](https://github.com/MarcusGrass/tiny-std/blob/main/tiny-std/src/thread/spawn.rs).
 With a huge amount of comments its 500 lines.
 
 I believe that it doesn't contain `UB` or leakage, but it's incredibly hard to test, what I know is lacking is signal 

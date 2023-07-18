@@ -958,20 +958,24 @@ const STATICPIE_HTML = String.raw`<div class="markdown-body"><h1>Static pie link
 if I try to compile executables created with them as <code>-C target-feature=+crt-static</code> (statically link the <code>C</code>-runtime),
 it segfaults.</p>
 <p>The purpose of creating <code>tiny-std</code> was to avoid <code>C</code>, but to get <code>Rust</code> to link a binary statically, that flag needs
-to be passed. <code>-C target-feature=+crt-static -C relocation-model=pie</code> does produce a valid binary though, so
-something about <code>PIE</code>-executables created with <code>tiny-std</code> fails, in this writeup I'll go into the solution for that.</p>
+to be passed. <code>-C target-feature=+crt-static -C relocation-model=static</code> does produce a valid binary though.
+The default relocation-model for static binaries is <code>-C relocation-model=static</code>,
+(at least for the target <code>x86_64-unknown-linux-gnu</code>) so something about <code>PIE</code>-executables created with <code>tiny-std</code> fails,
+in this writeup I'll go into the solution for that.</p>
 <h2>Static pie linking</h2>
 <p>Static pie linking is a combination of two concepts.</p>
 <ol>
-<li>Static linking, putting everything in the same place. As opposed to dynamic linking, where library dependencies
-can be found and used at runtime. Statically linking an executable gives it the property that it can be run on any system
+<li><a href="https://en.wikipedia.org/wiki/Static_library">Static linking</a>, putting everything in the same place at compile time.
+As opposed to dynamic linking, where library dependencies can be found and used at runtime.
+Statically linking an executable gives it the property that it can be run on any system
 that can handle the executable type, i.e. I can start a statically linked elf-executable on any platform that can run
 elf-executables. Whereas a dynamically linked executable will not start if its dynamic dependencies cannot be found
-at start.</li>
+at application start.</li>
 <li><a href="https://en.wikipedia.org/wiki/Position-independent_code">Position-independent code</a> position-independent code
-is able to run properly regardless of where in memory is placed. The benefit, as I understand it, is security-related.</li>
+is able to run properly regardless of where in memory is placed. The benefit, as I understand it, is security,
+and platform compatibility-related.</li>
 </ol>
-<p>When telling <code>rustc</code> to create a static pie linked executable through <code>-C target-feature=+crt-static -C relocation-model=pie</code>
+<p>When telling <code>rustc</code> to create a static-pie linked executable through <code>-C target-feature=+crt-static -C relocation-model=pie</code>
 (relocation-model defaults to pie, could be omitted), it creates an elf-executable which has a header that marks it as
 <code>DYN</code>. Here's what an example <code>readelf -h</code> looks like:</p>
 <div class="highlight highlight-shell"><pre>ELF Header:
@@ -996,12 +1000,12 @@ is able to run properly regardless of where in memory is placed. The benefit, as
 <span class="pl-s">  Section header string table index: 20</span>
 </pre></div>
 <p>This signals to the OS that the executable can be run position-independently, but since <code>tiny-std</code> assumes that
-memory addresses are absolute, the ones they were when compiled, the executable segfaults as soon as it tries to use
-any relocated data, like functions or static variables.</p>
+memory addresses are absolute, the ones they were when compiled, the executable segfaults as soon as it tries to get
+the address of any symbols, like functions or static variable, since those have been moved.</p>
 <h2>Where are my symbols?</h2>
 <p>This seems like a tricky problem, as a programmer, I have a bunch of variable and function calls, some that the
 <code>Rust</code>-language emits for me, now each of the addresses for those variables and functions are in another place.<br>
-Before using any of them, I need to do the remapping, which means that this needs to occur before using any functions (kinda).</p>
+Before using any of them, I need to remap them, which means that this needs to occur before using any functions (kinda).</p>
 <h2>The start function</h2>
 <p>The executable enters through the <code>_start</code> function, this is defined in <code>asm</code> for <code>tiny-std</code>:</p>
 <div class="highlight highlight-rust"><pre><span class="pl-c">// Binary entrypoint</span>
@@ -1024,7 +1028,7 @@ core<span class="pl-k">::</span>arch<span class="pl-k">::</span><span class="pl-
 then adds the offset off <code>_DYNAMIC</code> to the special purpose <code>rip</code>-register address, and puts that in <code>rsi</code> which becomes
 our called functions arg 2.</p>
 <p>Then we call <code>__proxy_main</code>, the signature looks like this:</p>
-<p><code>unsafe fn __proxy_main(stack_ptr: *const u8, dynv: *const usize)</code>
+<p><code>unsafe extern "C" fn __proxy_main(stack_ptr: *const u8, dynv: *const usize)</code>
 It takes the <code>stack_ptr</code> and the <code>dynv</code>-dynamic vector as arguments, which we provided in
 the above assembly.</p>
 <p>I wrote more about the <code>_start</code>-function in <a class="self-link" onclick=page_navigate("/pgwm03")>pgwm03</a> and <a href="https://fasterthanli.me/series/making-our-own-executable-packer/part-12">fasterthanli.me</a>
@@ -1033,11 +1037,11 @@ wrote more about it at their great blog, but in short:</p>
 map in faster functions from the vdso (see <a class="self-link" onclick=page_navigate("/pgwm03")>pgwm03</a> for more on that), and set up some thread-state,
 see <a class="self-link" onclick=page_navigate("/threads")>the thread writeup</a> for that.</p>
 <p>All these variables come off the executable's stack, which is why we need to pass the stack pointer as an argument to
-our setup-function, so that we can use it before we start polluting the stack.</p>
+our setup-function, so that we can use it before we start polluting the stack with our own stuff.</p>
 <p>The first extraction looks like this:</p>
 <div class="highlight highlight-rust"><pre>#[no_mangle]
 #[cfg(all(feature = <span class="pl-s">"symbols"</span>, feature = <span class="pl-s">"start"</span>))]
-<span class="pl-k">unsafe</span> <span class="pl-k">fn</span> <span class="pl-en">__proxy_main</span>(stack_ptr: <span class="pl-k">*const</span> <span class="pl-k">u8</span>, dynv: <span class="pl-k">*const</span> <span class="pl-k">usize</span>) {
+<span class="pl-k">unsafe</span> <span class="pl-k">extern</span> <span class="pl-s">"C"</span> <span class="pl-k">fn</span> <span class="pl-en">__proxy_main</span>(stack_ptr: <span class="pl-k">*const</span> <span class="pl-k">u8</span>, dynv: <span class="pl-k">*const</span> <span class="pl-k">usize</span>) {
     <span class="pl-c">// Fist 8 bytes is a u64 with the number of arguments</span>
     <span class="pl-k">let</span> argc <span class="pl-k">=</span> <span class="pl-k">*</span>(stack_ptr <span class="pl-k">as</span> <span class="pl-k">*const</span> <span class="pl-k">u64</span>);
     <span class="pl-c">// Directly followed by those arguments, bump pointer by 8 bytes</span>
@@ -1062,7 +1066,7 @@ our setup-function, so that we can use it before we start polluting the stack.</
 </pre></div>
 <p>This works all the same as a <code>pie</code> because:</p>
 <h2>Prelude, inline</h2>
-<p>We will only run into troubles when trying to access an address contained in the binary, such as a function call.<br>
+<p>We will only run into troubles when trying to find a symbol contained in the binary, such as a function call.<br>
 Up to here that hasn't been a problem, because even though we invoke <code>ptr::add()</code> and <code>core::mem:size_of::&#x3C;T>()</code> we don't
 need any addresses. This is because of inlining.</p>
 <p>Looking att <code>core::mem::size_of&#x3C;T>()</code>:</p>
@@ -1077,26 +1081,26 @@ need any addresses. This is because of inlining.</p>
 }
 </pre></div>
 <p>it has <code>#[inline(always)]</code>, the same goes for <code>ptr::add()</code>. Since that code is inlined, we don't need to have an address
-to a function and thus works even though all of our addresses are off.</p>
-<p>To be able to debug function addresses, I would like to print them, since I haven't been able to hook a debugger up
+to a function, and therefore it works even though all of our addresses are off.</p>
+<p>To be able to debug, I would like to be able to print stuff, since I haven't been able to hook a debugger up
 to <code>tiny-std</code> executables yet. But, printing to the terminal requires code, code that usually isn't <code>#[inline(always)]</code>.</p>
 <p>So I wrote a small print:</p>
 <div class="highlight highlight-rust"><pre>#[inline(always)]
 <span class="pl-k">unsafe</span> <span class="pl-k">fn</span> <span class="pl-en">print_labeled</span>(msg: <span class="pl-k">&#x26;</span>[<span class="pl-k">u8</span>], val: <span class="pl-k">usize</span>) {
-<span class="pl-en">print_label</span>(msg);
-<span class="pl-en">print_val</span>(val);
+    <span class="pl-en">print_label</span>(msg);
+    <span class="pl-en">print_val</span>(val);
 }
 #[inline(always)]
 <span class="pl-k">unsafe</span> <span class="pl-k">fn</span> <span class="pl-en">print_label</span>(msg: <span class="pl-k">&#x26;</span>[<span class="pl-k">u8</span>]) {
-<span class="pl-en">syscall!</span>(WRITE, <span class="pl-c1">1</span>, msg.<span class="pl-en">as_ptr</span>(), msg.<span class="pl-en">len</span>());
+    <span class="pl-en">syscall!</span>(WRITE, <span class="pl-c1">1</span>, msg.<span class="pl-en">as_ptr</span>(), msg.<span class="pl-en">len</span>());
 }
 #[inline(always)]
 <span class="pl-k">unsafe</span> <span class="pl-k">fn</span> <span class="pl-en">print_val</span>(u: <span class="pl-k">usize</span>) {
-<span class="pl-en">syscall!</span>(WRITE, <span class="pl-c1">1</span>, <span class="pl-en">num_to_digits</span>(u).<span class="pl-en">as_ptr</span>(), <span class="pl-c1">21</span>);
+    <span class="pl-en">syscall!</span>(WRITE, <span class="pl-c1">1</span>, <span class="pl-en">num_to_digits</span>(u).<span class="pl-en">as_ptr</span>(), <span class="pl-c1">21</span>);
 }
 #[inline(always)]
-<span class="pl-k">unsafe</span> <span class="pl-k">fn</span> <span class="pl-en">num_to_digits</span>(<span class="pl-k">mut</span> u: <span class="pl-k">usize</span>) -> [<span class="pl-k">u8</span>; <span class="pl-c1">21</span>] {
-    <span class="pl-k">let</span> <span class="pl-k">mut</span> base <span class="pl-k">=</span> <span class="pl-k">*</span><span class="pl-s">b"<span class="pl-cce">\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\n</span>"</span>;
+<span class="pl-k">unsafe</span> <span class="pl-k">fn</span> <span class="pl-en">num_to_digits</span>(<span class="pl-k">mut</span> u: <span class="pl-k">usize</span>) -> [<span class="pl-k">u8</span>; <span class="pl-c1">22</span>] {
+    <span class="pl-k">let</span> <span class="pl-k">mut</span> base <span class="pl-k">=</span> <span class="pl-k">*</span><span class="pl-s">b"<span class="pl-cce">\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\n</span>"</span>;
     <span class="pl-k">let</span> <span class="pl-k">mut</span> ind <span class="pl-k">=</span> base.<span class="pl-en">len</span>() <span class="pl-k">-</span> <span class="pl-c1">2</span>;
     <span class="pl-k">if</span> u <span class="pl-k">==</span> <span class="pl-c1">0</span> {
         base[ind] <span class="pl-k">=</span> <span class="pl-c1">48</span>;
@@ -1122,9 +1126,15 @@ trailing zeroes.</p>
 }
 </pre></div>
 <h2>Relocation</h2>
-<p>Now that debug-printing is possible we can start working on relocating the adresses.</p>
+<p>Now that basic debug-printing is possible we can start working on relocating the addresses.</p>
 <p>I previously had written some code the extract <code>aux</code>-values, but now that code needs to run without using any
 non-inlined functions or variables.</p>
+<h3>Aux values</h3>
+<p>A good description of aux-values comes from <a href="https://man7.org/linux/man-pages/man3/getauxval.3.html">the docs here</a>,
+in short the kernel puts some data in the memory of a program when it's loaded.<br>
+This data points to other data that we'll need to do relocation. It also has an insane layout for reasons that
+I haven't yet been able to find any motivation for.<br>
+A pointer to the aux-values are put after the <code>envp</code> on the stack.</p>
 <p>The aux-values were collected and stored pretty sloppily as a global static variable before,
 this time it needs to be collected onto the stack, used for finding the dynamic relocation addresses,
 and then it could be put into a static variable after that.</p>
@@ -1174,8 +1184,8 @@ if we try to stack allocate its value mappings on the stack like this:</p>
 <p>We immediately segfault.</p>
 <h3>SYMBOLS!!!</h3>
 <p>It took me a while to figure out what's happening, when you allocate a zeroed array in rust, and
-that array is larger than <code>[0usize; 32]</code> it instead of using <code>sse</code>, uses <code>memset</code> to zero the memory
-it just took off the stack.</p>
+that array is larger than <code>[0usize; 32]</code> (256 bytes of zeroes seems to be the exact breakpoint)
+it instead of using <code>sse</code> instructions, uses <code>memset</code> to zero the memory it just took off the stack.</p>
 <p>The asm will look like this:</p>
 <pre><code class="language-asm">        ...
         mov edx, 296
@@ -1189,8 +1199,9 @@ I tried a myriad of ways to get the compiler to not emit that symbol, among
 <a href="https://users.rust-lang.org/t/reliably-working-around-rust-emitting-memset-when-putting-a-slice-on-the-stack/97080">posting this</a>
 help request.</p>
 <p>It seems that there is no reliable way to avoid <code>rustc</code> emitting unwanted symbols without doing it all in assembly,
-and since that seems a bit much, at least right now, I opted to instead restructure the code.</p>
-<p>The unpacked aux values now look like this:</p>
+and since that seems a bit much, at least right now, I opted to instead restructure the code. Unpacking both
+the aux and dyn values and just keeping what <code>tiny-std</code> needs.<br>
+The unpacked aux values now look like this:</p>
 <div class="highlight highlight-rust"><pre><span class="pl-c">/// Some selected aux-values, needs to be kept small since they're collected</span>
 <span class="pl-c">/// before symbol relocation on static-pie-linked binaries, which means rustc</span>
 <span class="pl-c">/// will emit memset on a zeroed allocation of over 256 bytes, which we won't be able</span>
@@ -1252,7 +1263,9 @@ and since that seems a bit much, at least right now, I opted to instead restruct
 }
 </pre></div>
 <p>After the <code>relocate</code>-section runs, we can again use <code>symbols</code>, and <code>tiny-std</code> can continue with the setup.</p>
-<h2></h2>
+<h2>Outro</h2>
+<p>The commit that added the functionality can be found <a href="https://github.com/MarcusGrass/tiny-std/commit/fce20899b891cb07913800dc63fae991f758a819">here</a>.</p>
+<p>Thanks for reading!</p>
 </div>`;
 const TEST_HTML = String.raw`<div class="markdown-body"><h1>Here's a test write-up</h1>
 <p>I always test in prod.</p>
@@ -1755,7 +1768,7 @@ that allocated heap-memory. This needs to be done both in successful and panicki
 <p>I've been dreading reinventing this particular wheel, but I'm glad I did.
 I learnt a lot, and it was interesting to dig into how threading works in practice on <code>Linux</code>, plus <code>tiny-std</code> now has
 threads!</p>
-<p>The code for threads in tine-std can be found <a href="https://github.com/MarcusGrass/tiny-std/blob/main/tiny-std/src/thread/spawn.rs">here</a>.
+<p>The code for threads in tiny-std can be found <a href="https://github.com/MarcusGrass/tiny-std/blob/main/tiny-std/src/thread/spawn.rs">here</a>.
 With a huge amount of comments its 500 lines.</p>
 <p>I believe that it doesn't contain <code>UB</code> or leakage, but it's incredibly hard to test, what I know is lacking is signal
 handling, which is something else that I have been dreading getting into.</p>

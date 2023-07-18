@@ -4,21 +4,25 @@ if I try to compile executables created with them as `-C target-feature=+crt-sta
 it segfaults.
 
 The purpose of creating `tiny-std` was to avoid `C`, but to get `Rust` to link a binary statically, that flag needs 
-to be passed. `-C target-feature=+crt-static -C relocation-model=pie` does produce a valid binary though, so 
-something about `PIE`-executables created with `tiny-std` fails, in this writeup I'll go into the solution for that.  
+to be passed. `-C target-feature=+crt-static -C relocation-model=static` does produce a valid binary though. 
+The default relocation-model for static binaries is `-C relocation-model=static`, 
+(at least for the target `x86_64-unknown-linux-gnu`) so something about `PIE`-executables created with `tiny-std` fails,
+in this writeup I'll go into the solution for that.  
 
 ## Static pie linking
 Static pie linking is a combination of two concepts. 
 
-1. Static linking, putting everything in the same place. As opposed to dynamic linking, where library dependencies 
-can be found and used at runtime. Statically linking an executable gives it the property that it can be run on any system
+1. [Static linking](https://en.wikipedia.org/wiki/Static_library), putting everything in the same place at compile time. 
+As opposed to dynamic linking, where library dependencies can be found and used at runtime. 
+Statically linking an executable gives it the property that it can be run on any system
 that can handle the executable type, i.e. I can start a statically linked elf-executable on any platform that can run 
 elf-executables. Whereas a dynamically linked executable will not start if its dynamic dependencies cannot be found 
-at start.
+at application start.
 2. [Position-independent code](https://en.wikipedia.org/wiki/Position-independent_code) position-independent code 
-is able to run properly regardless of where in memory is placed. The benefit, as I understand it, is security-related.
+is able to run properly regardless of where in memory is placed. The benefit, as I understand it, is security, 
+and platform compatibility-related.  
 
-When telling `rustc` to create a static pie linked executable through `-C target-feature=+crt-static -C relocation-model=pie`
+When telling `rustc` to create a static-pie linked executable through `-C target-feature=+crt-static -C relocation-model=pie`
 (relocation-model defaults to pie, could be omitted), it creates an elf-executable which has a header that marks it as 
 `DYN`. Here's what an example `readelf -h` looks like:
 
@@ -46,13 +50,13 @@ ELF Header:
 ```
 
 This signals to the OS that the executable can be run position-independently, but since `tiny-std` assumes that 
-memory addresses are absolute, the ones they were when compiled, the executable segfaults as soon as it tries to use 
-any relocated data, like functions or static variables.
+memory addresses are absolute, the ones they were when compiled, the executable segfaults as soon as it tries to get 
+the address of any symbols, like functions or static variable, since those have been moved.
 
 ## Where are my symbols?
 This seems like a tricky problem, as a programmer, I have a bunch of variable and function calls, some that the 
 `Rust`-language emits for me, now each of the addresses for those variables and functions are in another place.  
-Before using any of them, I need to do the remapping, which means that this needs to occur before using any functions (kinda).  
+Before using any of them, I need to remap them, which means that this needs to occur before using any functions (kinda).  
 
 ## The start function
 The executable enters through the `_start` function, this is defined in `asm` for `tiny-std`:
@@ -81,7 +85,7 @@ our called functions arg 2.
 
 Then we call `__proxy_main`, the signature looks like this:
 
-`unsafe fn __proxy_main(stack_ptr: *const u8, dynv: *const usize)` 
+`unsafe extern "C" fn __proxy_main(stack_ptr: *const u8, dynv: *const usize)` 
 It takes the `stack_ptr` and the `dynv`-dynamic vector as arguments, which we provided in 
 the above assembly.
 
@@ -93,14 +97,14 @@ map in faster functions from the vdso (see [pgwm03](/pgwm03) for more on that), 
 see [the thread writeup](/threads) for that.  
 
 All these variables come off the executable's stack, which is why we need to pass the stack pointer as an argument to 
-our setup-function, so that we can use it before we start polluting the stack.  
+our setup-function, so that we can use it before we start polluting the stack with our own stuff.  
 
 The first extraction looks like this:
 
 ```rust
 #[no_mangle]
 #[cfg(all(feature = "symbols", feature = "start"))]
-unsafe fn __proxy_main(stack_ptr: *const u8, dynv: *const usize) {
+unsafe extern "C" fn __proxy_main(stack_ptr: *const u8, dynv: *const usize) {
     // Fist 8 bytes is a u64 with the number of arguments
     let argc = *(stack_ptr as *const u64);
     // Directly followed by those arguments, bump pointer by 8 bytes
@@ -129,7 +133,7 @@ This works all the same as a `pie` because:
 
 ## Prelude, inline
 
-We will only run into troubles when trying to access an address contained in the binary, such as a function call.  
+We will only run into troubles when trying to find a symbol contained in the binary, such as a function call.  
 Up to here that hasn't been a problem, because even though we invoke `ptr::add()` and `core::mem:size_of::<T>()` we don't 
 need any addresses. This is because of inlining. 
 
@@ -148,9 +152,9 @@ pub const fn size_of<T>() -> usize {
 ```
 
 it has `#[inline(always)]`, the same goes for `ptr::add()`. Since that code is inlined, we don't need to have an address 
-to a function and thus works even though all of our addresses are off.
+to a function, and therefore it works even though all of our addresses are off.
 
-To be able to debug function addresses, I would like to print them, since I haven't been able to hook a debugger up 
+To be able to debug, I would like to be able to print stuff, since I haven't been able to hook a debugger up 
 to `tiny-std` executables yet. But, printing to the terminal requires code, code that usually isn't `#[inline(always)]`. 
 
 So I wrote a small print:
@@ -158,23 +162,23 @@ So I wrote a small print:
 ```rust
 #[inline(always)]
 unsafe fn print_labeled(msg: &[u8], val: usize) {
-print_label(msg);
-print_val(val);
+    print_label(msg);
+    print_val(val);
 }
 
 #[inline(always)]
 unsafe fn print_label(msg: &[u8]) {
-syscall!(WRITE, 1, msg.as_ptr(), msg.len());
+    syscall!(WRITE, 1, msg.as_ptr(), msg.len());
 }
 
 #[inline(always)]
 unsafe fn print_val(u: usize) {
-syscall!(WRITE, 1, num_to_digits(u).as_ptr(), 21);
+    syscall!(WRITE, 1, num_to_digits(u).as_ptr(), 21);
 }
 
 #[inline(always)]
-unsafe fn num_to_digits(mut u: usize) -> [u8; 21] {
-    let mut base = *b"\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\n";
+unsafe fn num_to_digits(mut u: usize) -> [u8; 22] {
+    let mut base = *b"\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\n";
     let mut ind = base.len() - 2;
     if u == 0 {
         base[ind] = 48;
@@ -206,14 +210,21 @@ fn test() {
 ```
 
 ## Relocation
-Now that debug-printing is possible we can start working on relocating the adresses.  
+Now that basic debug-printing is possible we can start working on relocating the addresses.  
 
 I previously had written some code the extract `aux`-values, but now that code needs to run without using any 
 non-inlined functions or variables.  
 
+### Aux values
+A good description of aux-values comes from [the docs here](https://man7.org/linux/man-pages/man3/getauxval.3.html), 
+in short the kernel puts some data in the memory of a program when it's loaded.  
+This data points to other data that we'll need to do relocation. It also has an insane layout for reasons that 
+I haven't yet been able to find any motivation for.  
+A pointer to the aux-values are put after the `envp` on the stack.  
+
 The aux-values were collected and stored pretty sloppily as a global static variable before, 
 this time it needs to be collected onto the stack, used for finding the dynamic relocation addresses, 
-and then it could be put into a static variable after that.  
+and then it could be put into a static variable after that.
 
 We'll also need the `dyn`-values, which are essentially the same as aux-values, provided for `DYN`-objects.
 
@@ -280,8 +291,8 @@ We immediately segfault.
 
 ### SYMBOLS!!!
 It took me a while to figure out what's happening, when you allocate a zeroed array in rust, and 
-that array is larger than `[0usize; 32]` it instead of using `sse`, uses `memset` to zero the memory 
-it just took off the stack.  
+that array is larger than `[0usize; 32]` (256 bytes of zeroes seems to be the exact breakpoint) 
+it instead of using `sse` instructions, uses `memset` to zero the memory it just took off the stack.  
 
 The asm will look like this:
 
@@ -300,8 +311,8 @@ I tried a myriad of ways to get the compiler to not emit that symbol, among
 help request.  
 
 It seems that there is no reliable way to avoid `rustc` emitting unwanted symbols without doing it all in assembly, 
-and since that seems a bit much, at least right now, I opted to instead restructure the code.  
-
+and since that seems a bit much, at least right now, I opted to instead restructure the code. Unpacking both 
+the aux and dyn values and just keeping what `tiny-std` needs.  
 The unpacked aux values now look like this:
 
 ```rust
@@ -383,4 +394,7 @@ pub(crate) unsafe fn relocate(&self, base_addr: usize) {
 
 After the `relocate`-section runs, we can again use `symbols`, and `tiny-std` can continue with the setup.
 
-##
+## Outro
+The commit that added the functionality can be found [here](https://github.com/MarcusGrass/tiny-std/commit/fce20899b891cb07913800dc63fae991f758a819).  
+
+Thanks for reading!
