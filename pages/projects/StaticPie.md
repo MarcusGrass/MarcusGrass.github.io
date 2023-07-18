@@ -18,9 +18,8 @@ Statically linking an executable gives it the property that it can be run on any
 that can handle the executable type, i.e. I can start a statically linked elf-executable on any platform that can run 
 elf-executables. Whereas a dynamically linked executable will not start if its dynamic dependencies cannot be found 
 at application start.
-2. [Position-independent code](https://en.wikipedia.org/wiki/Position-independent_code) position-independent code 
-is able to run properly regardless of where in memory is placed. The benefit, as I understand it, is security, 
-and platform compatibility-related.  
+2. [Position-independent code](https://en.wikipedia.org/wiki/Position-independent_code) is able to run properly
+regardless of where in memory is placed. The benefit, as I understand it, is security, and platform compatibility-related.  
 
 When telling `rustc` to create a static-pie linked executable through `-C target-feature=+crt-static -C relocation-model=pie`
 (relocation-model defaults to pie, could be omitted), it creates an elf-executable which has a header that marks it as 
@@ -282,7 +281,7 @@ that program header holds an offset at `p_vaddr` that can be subtracted from the
 the correct `base` address.  
 
 ## Initialize the dyn section
-The `dynv` pointer supplied by the os, as previously stated, it is analogous to the `aux`-pointer but 
+The `dynv` pointer supplied by the os, as previously stated, is analogous to the `aux`-pointer but 
 trying to stack allocate its value mappings like this:
 
 ```rust

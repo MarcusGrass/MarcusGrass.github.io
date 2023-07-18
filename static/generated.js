@@ -971,9 +971,8 @@ Statically linking an executable gives it the property that it can be run on any
 that can handle the executable type, i.e. I can start a statically linked elf-executable on any platform that can run
 elf-executables. Whereas a dynamically linked executable will not start if its dynamic dependencies cannot be found
 at application start.</li>
-<li><a href="https://en.wikipedia.org/wiki/Position-independent_code">Position-independent code</a> position-independent code
-is able to run properly regardless of where in memory is placed. The benefit, as I understand it, is security,
-and platform compatibility-related.</li>
+<li><a href="https://en.wikipedia.org/wiki/Position-independent_code">Position-independent code</a> is able to run properly
+regardless of where in memory is placed. The benefit, as I understand it, is security, and platform compatibility-related.</li>
 </ol>
 <p>When telling <code>rustc</code> to create a static-pie linked executable through <code>-C target-feature=+crt-static -C relocation-model=pie</code>
 (relocation-model defaults to pie, could be omitted), it creates an elf-executable which has a header that marks it as
@@ -1179,7 +1178,7 @@ the necessary ones for remapping are:</p>
 that program header holds an offset at <code>p_vaddr</code> that can be subtracted from the <code>dynv</code> pointer to get
 the correct <code>base</code> address.</p>
 <h2>Initialize the dyn section</h2>
-<p>The <code>dynv</code> pointer supplied by the os, as previously stated, it is analogous to the <code>aux</code>-pointer but
+<p>The <code>dynv</code> pointer supplied by the os, as previously stated, is analogous to the <code>aux</code>-pointer but
 trying to stack allocate its value mappings like this:</p>
 <div class="highlight highlight-rust"><pre><span class="pl-k">let</span> dyn_values <span class="pl-k">=</span> [<span class="pl-c1">0usize</span>; <span class="pl-c1">37</span>];
 </pre></div>
