@@ -959,7 +959,7 @@ if I try to compile executables created with them as <code>-C target-feature=+cr
 it segfaults.</p>
 <p>The purpose of creating <code>tiny-std</code> was to avoid <code>C</code>, but to get <code>Rust</code> to link a binary statically, that flag needs
 to be passed. <code>-C target-feature=+crt-static -C relocation-model=static</code> does produce a valid binary though.
-The default relocation-model for static binaries is <code>-C relocation-model=static</code>,
+The default relocation-model for static binaries is <code>-C relocation-model=pie</code>,
 (at least for the target <code>x86_64-unknown-linux-gnu</code>) so something about <code>PIE</code>-executables created with <code>tiny-std</code> fails,
 in this writeup I'll go into the solution for that.</p>
 <h2>Static pie linking</h2>
@@ -1001,11 +1001,12 @@ and platform compatibility-related.</li>
 </pre></div>
 <p>This signals to the OS that the executable can be run position-independently, but since <code>tiny-std</code> assumes that
 memory addresses are absolute, the ones they were when compiled, the executable segfaults as soon as it tries to get
-the address of any symbols, like functions or static variable, since those have been moved.</p>
+the address of any symbols, like functions or static variables, since those have been moved.</p>
 <h2>Where are my symbols?</h2>
 <p>This seems like a tricky problem, as a programmer, I have a bunch of variable and function calls, some that the
-<code>Rust</code>-language emits for me, now each of the addresses for those variables and functions are in another place.<br>
-Before using any of them, I need to remap them, which means that this needs to occur before using any functions (kinda).</p>
+<code>Rust</code>-language emits for me, now each of the addresses for those variables and functions are in another place in memory.<br>
+Before using any of them I need to remap them, which means that I need to have remapping code before using any
+function calls (kinda).</p>
 <h2>The start function</h2>
 <p>The executable enters through the <code>_start</code> function, this is defined in <code>asm</code> for <code>tiny-std</code>:</p>
 <div class="highlight highlight-rust"><pre><span class="pl-c">// Binary entrypoint</span>
@@ -1026,7 +1027,7 @@ core<span class="pl-k">::</span>arch<span class="pl-k">::</span><span class="pl-
 </pre></div>
 <p>The assembly prepares the stack by aligning it, putting the stack pointer into arg1 for the coming function-call,
 then adds the offset off <code>_DYNAMIC</code> to the special purpose <code>rip</code>-register address, and puts that in <code>rsi</code> which becomes
-our called functions arg 2.</p>
+our called function's arg 2.</p>
 <p>Then we call <code>__proxy_main</code>, the signature looks like this:</p>
 <p><code>unsafe extern "C" fn __proxy_main(stack_ptr: *const u8, dynv: *const usize)</code>
 It takes the <code>stack_ptr</code> and the <code>dynv</code>-dynamic vector as arguments, which we provided in
@@ -1066,10 +1067,10 @@ our setup-function, so that we can use it before we start polluting the stack wi
 </pre></div>
 <p>This works all the same as a <code>pie</code> because:</p>
 <h2>Prelude, inline</h2>
-<p>We will only run into troubles when trying to find a symbol contained in the binary, such as a function call.<br>
-Up to here that hasn't been a problem, because even though we invoke <code>ptr::add()</code> and <code>core::mem:size_of::&#x3C;T>()</code> we don't
+<p>We will only run into trouble when trying to find a symbol contained in the binary, such as a function call.<br>
+Up to here, that hasn't been a problem because even though we invoke <code>ptr::add()</code> and <code>core::mem:size_of::&#x3C;T>()</code> we don't
 need any addresses. This is because of inlining.</p>
-<p>Looking att <code>core::mem::size_of&#x3C;T>()</code>:</p>
+<p>Looking at <code>core::mem::size_of&#x3C;T>()</code>:</p>
 <div class="highlight highlight-rust"><pre>#[inline(always)]
 #[must_use]
 #[stable(feature = <span class="pl-s">"rust1"</span>, since = <span class="pl-s">"1.0.0"</span>)]
@@ -1082,7 +1083,7 @@ need any addresses. This is because of inlining.</p>
 </pre></div>
 <p>it has <code>#[inline(always)]</code>, the same goes for <code>ptr::add()</code>. Since that code is inlined, we don't need to have an address
 to a function, and therefore it works even though all of our addresses are off.</p>
-<p>To be able to debug, I would like to be able to print stuff, since I haven't been able to hook a debugger up
+<p>To be able to debug, I would like to be able to print variables, since I haven't been able to hook a debugger up
 to <code>tiny-std</code> executables yet. But, printing to the terminal requires code, code that usually isn't <code>#[inline(always)]</code>.</p>
 <p>So I wrote a small print:</p>
 <div class="highlight highlight-rust"><pre>#[inline(always)]
@@ -1114,7 +1115,7 @@ to <code>tiny-std</code> executables yet. But, printing to the terminal requires
     base
 }
 </pre></div>
-<p>Printing to the terminal can be done through the syscall <code>WRITE</code> on <code>fd</code> <code>1</code> (STDOUT).<br>
+<p>Printing to the terminal can be done through the syscall <code>WRITE</code> on <code>fd</code> <code>1</code> (<code>STDOUT</code>).<br>
 It takes a buffer of bytes and a length. The call through <code>syscall!()</code> is always inlined.</p>
 <p>Since I primarily need look at addresses, I just print <code>usize</code>, and I wrote a beautifully stupid number to digits function.<br>
 Since the max digits of a <code>usize</code> on a 64-bit machine is 21, I allocate a slice on the stack filled with
@@ -1135,9 +1136,10 @@ in short the kernel puts some data in the memory of a program when it's loaded.<
 This data points to other data that we'll need to do relocation. It also has an insane layout for reasons that
 I haven't yet been able to find any motivation for.<br>
 A pointer to the aux-values are put after the <code>envp</code> on the stack.</p>
-<p>The aux-values were collected and stored pretty sloppily as a global static variable before,
+<p>The aux-values were collected and stored pretty sloppily as a global static variable before implementing this change,
 this time it needs to be collected onto the stack, used for finding the dynamic relocation addresses,
-and then it could be put into a static variable after that.</p>
+and then it could be put into a static variable after that (since we can't find the address of the static variable before
+remapping).</p>
 <p>We'll also need the <code>dyn</code>-values, which are essentially the same as aux-values, provided for <code>DYN</code>-objects.</p>
 <p>In musl, the aux-values that are put on the stack looks like this:</p>
 <div class="highlight highlight-c"><pre><span class="pl-c1">size_t</span> i, aux[AUX_CNT], dyn[DYN_CNT];
@@ -1177,15 +1179,15 @@ than we'll need:</p>
 that program header holds an offset at <code>p_vaddr</code> that we can subtract from the <code>dynv</code> pointer to get
 our correct <code>base</code> address.</p>
 <h2>Initialize the dyn section</h2>
-<p>The <code>dynv</code> pointer supplied by the os, as previously stated, is analogous to the <code>aux</code>-pointer but
-if we try to stack allocate its value mappings on the stack like this:</p>
+<p>The <code>dynv</code> pointer supplied by the os, as previously stated, it is analogous to the <code>aux</code>-pointer but
+if we try to stack allocate its value mappings like this:</p>
 <div class="highlight highlight-rust"><pre><span class="pl-k">let</span> dyn_values <span class="pl-k">=</span> [<span class="pl-c1">0usize</span>; <span class="pl-c1">37</span>];
 </pre></div>
-<p>We immediately segfault.</p>
+<p>It will cause a segfault.</p>
 <h3>SYMBOLS!!!</h3>
 <p>It took me a while to figure out what's happening, when you allocate a zeroed array in rust, and
 that array is larger than <code>[0usize; 32]</code> (256 bytes of zeroes seems to be the exact breakpoint)
-it instead of using <code>sse</code> instructions, uses <code>memset</code> to zero the memory it just took off the stack.</p>
+<code>rustc</code> instead of using <code>sse</code> instructions, uses <code>memset</code> to zero the memory it just took off the stack.</p>
 <p>The asm will look like this:</p>
 <pre><code class="language-asm">        ...
         mov edx, 296
@@ -1238,7 +1240,7 @@ The unpacked aux values now look like this:</p>
     rela_sz: <span class="pl-k">usize</span>,
 }
 </pre></div>
-<p>We can fill that struct with the values from the <code>dynv</code>-pointer, and then finally relocate:</p>
+<p>Now that we've sidestepped <code>rustc</code>'s memset emissions, we can fill that struct with the values from the <code>dynv</code>-pointer, and then finally relocate:</p>
 <div class="highlight highlight-rust"><pre>#[inline(always)]
 <span class="pl-k">pub</span>(<span class="pl-k">crate</span>) <span class="pl-k">unsafe</span> <span class="pl-k">fn</span> <span class="pl-en">relocate</span>(<span class="pl-k">&#x26;</span><span class="pl-c1">self</span>, base_addr: <span class="pl-k">usize</span>) {
     <span class="pl-c">// Relocate all rel-entries</span>

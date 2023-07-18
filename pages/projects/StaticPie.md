@@ -5,7 +5,7 @@ it segfaults.
 
 The purpose of creating `tiny-std` was to avoid `C`, but to get `Rust` to link a binary statically, that flag needs 
 to be passed. `-C target-feature=+crt-static -C relocation-model=static` does produce a valid binary though. 
-The default relocation-model for static binaries is `-C relocation-model=static`, 
+The default relocation-model for static binaries is `-C relocation-model=pie`, 
 (at least for the target `x86_64-unknown-linux-gnu`) so something about `PIE`-executables created with `tiny-std` fails,
 in this writeup I'll go into the solution for that.  
 
@@ -51,12 +51,13 @@ ELF Header:
 
 This signals to the OS that the executable can be run position-independently, but since `tiny-std` assumes that 
 memory addresses are absolute, the ones they were when compiled, the executable segfaults as soon as it tries to get 
-the address of any symbols, like functions or static variable, since those have been moved.
+the address of any symbols, like functions or static variables, since those have been moved.
 
 ## Where are my symbols?
 This seems like a tricky problem, as a programmer, I have a bunch of variable and function calls, some that the 
-`Rust`-language emits for me, now each of the addresses for those variables and functions are in another place.  
-Before using any of them, I need to remap them, which means that this needs to occur before using any functions (kinda).  
+`Rust`-language emits for me, now each of the addresses for those variables and functions are in another place in memory.  
+Before using any of them I need to remap them, which means that I need to have remapping code before using any 
+function calls (kinda).  
 
 ## The start function
 The executable enters through the `_start` function, this is defined in `asm` for `tiny-std`:
@@ -81,7 +82,7 @@ core::arch::global_asm!(
 
 The assembly prepares the stack by aligning it, putting the stack pointer into arg1 for the coming function-call, 
 then adds the offset off `_DYNAMIC` to the special purpose `rip`-register address, and puts that in `rsi` which becomes 
-our called functions arg 2.
+our called function's arg 2.
 
 Then we call `__proxy_main`, the signature looks like this:
 
@@ -133,11 +134,11 @@ This works all the same as a `pie` because:
 
 ## Prelude, inline
 
-We will only run into troubles when trying to find a symbol contained in the binary, such as a function call.  
-Up to here that hasn't been a problem, because even though we invoke `ptr::add()` and `core::mem:size_of::<T>()` we don't 
+We will only run into trouble when trying to find a symbol contained in the binary, such as a function call.  
+Up to here, that hasn't been a problem because even though we invoke `ptr::add()` and `core::mem:size_of::<T>()` we don't 
 need any addresses. This is because of inlining. 
 
-Looking att `core::mem::size_of<T>()`:  
+Looking at `core::mem::size_of<T>()`:  
 
 ```rust
 #[inline(always)]
@@ -154,7 +155,7 @@ pub const fn size_of<T>() -> usize {
 it has `#[inline(always)]`, the same goes for `ptr::add()`. Since that code is inlined, we don't need to have an address 
 to a function, and therefore it works even though all of our addresses are off.
 
-To be able to debug, I would like to be able to print stuff, since I haven't been able to hook a debugger up 
+To be able to debug, I would like to be able to print variables, since I haven't been able to hook a debugger up 
 to `tiny-std` executables yet. But, printing to the terminal requires code, code that usually isn't `#[inline(always)]`. 
 
 So I wrote a small print:
@@ -193,7 +194,7 @@ unsafe fn num_to_digits(mut u: usize) -> [u8; 22] {
 }
 ```
 
-Printing to the terminal can be done through the syscall `WRITE` on `fd` `1` (STDOUT).  
+Printing to the terminal can be done through the syscall `WRITE` on `fd` `1` (`STDOUT`).  
 It takes a buffer of bytes and a length. The call through `syscall!()` is always inlined.  
 
 Since I primarily need look at addresses, I just print `usize`, and I wrote a beautifully stupid number to digits function.  
@@ -222,9 +223,10 @@ This data points to other data that we'll need to do relocation. It also has an 
 I haven't yet been able to find any motivation for.  
 A pointer to the aux-values are put after the `envp` on the stack.  
 
-The aux-values were collected and stored pretty sloppily as a global static variable before, 
+The aux-values were collected and stored pretty sloppily as a global static variable before implementing this change, 
 this time it needs to be collected onto the stack, used for finding the dynamic relocation addresses, 
-and then it could be put into a static variable after that.
+and then it could be put into a static variable after that (since we can't find the address of the static variable before 
+remapping).
 
 We'll also need the `dyn`-values, which are essentially the same as aux-values, provided for `DYN`-objects.
 
@@ -280,19 +282,19 @@ that program header holds an offset at `p_vaddr` that we can subtract from the `
 our correct `base` address.  
 
 ## Initialize the dyn section
-The `dynv` pointer supplied by the os, as previously stated, is analogous to the `aux`-pointer but 
-if we try to stack allocate its value mappings on the stack like this:
+The `dynv` pointer supplied by the os, as previously stated, it is analogous to the `aux`-pointer but 
+if we try to stack allocate its value mappings like this:
 
 ```rust
 let dyn_values = [0usize; 37];
 ```
 
-We immediately segfault.
+It will cause a segfault.
 
 ### SYMBOLS!!!
 It took me a while to figure out what's happening, when you allocate a zeroed array in rust, and 
 that array is larger than `[0usize; 32]` (256 bytes of zeroes seems to be the exact breakpoint) 
-it instead of using `sse` instructions, uses `memset` to zero the memory it just took off the stack.  
+`rustc` instead of using `sse` instructions, uses `memset` to zero the memory it just took off the stack.  
 
 The asm will look like this:
 
@@ -365,7 +367,7 @@ pub(crate) struct DynSection {
 }
 ```
 
-We can fill that struct with the values from the `dynv`-pointer, and then finally relocate: 
+Now that we've sidestepped `rustc`'s memset emissions, we can fill that struct with the values from the `dynv`-pointer, and then finally relocate: 
 
 ```rust
 #[inline(always)]
