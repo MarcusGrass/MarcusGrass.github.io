@@ -1028,17 +1028,17 @@ core<span class="pl-k">::</span>arch<span class="pl-k">::</span><span class="pl-
 <p>The assembly prepares the stack by aligning it, putting the stack pointer into arg1 for the coming function-call,
 then adds the offset off <code>_DYNAMIC</code> to the special purpose <code>rip</code>-register address, and puts that in <code>rsi</code> which becomes
 our called function's arg 2.</p>
-<p>Then we call <code>__proxy_main</code>, the signature looks like this:</p>
+<p>After that <code>__proxy_main</code> is called, the signature looks like this:</p>
 <p><code>unsafe extern "C" fn __proxy_main(stack_ptr: *const u8, dynv: *const usize)</code>
-It takes the <code>stack_ptr</code> and the <code>dynv</code>-dynamic vector as arguments, which we provided in
+It takes the <code>stack_ptr</code> and the <code>dynv</code>-dynamic vector as arguments, which were provided in
 the above assembly.</p>
 <p>I wrote more about the <code>_start</code>-function in <a class="self-link" onclick=page_navigate("/pgwm03")>pgwm03</a> and <a href="https://fasterthanli.me/series/making-our-own-executable-packer/part-12">fasterthanli.me</a>
 wrote more about it at their great blog, but in short:</p>
-<p>Before running the user's <code>main</code> we need to set up some stuff, like arguments, environment variables, <a href="https://man7.org/linux/man-pages/man3/getauxval.3.html">aux-values</a>,
+<p>Before running the user's <code>main</code> some setup is required, like arguments, environment variables, <a href="https://man7.org/linux/man-pages/man3/getauxval.3.html">aux-values</a>,
 map in faster functions from the vdso (see <a class="self-link" onclick=page_navigate("/pgwm03")>pgwm03</a> for more on that), and set up some thread-state,
 see <a class="self-link" onclick=page_navigate("/threads")>the thread writeup</a> for that.</p>
-<p>All these variables come off the executable's stack, which is why we need to pass the stack pointer as an argument to
-our setup-function, so that we can use it before we start polluting the stack with our own stuff.</p>
+<p>All these variables come off the executable's stack, which is why stack pointer needs to be passed as an argument to
+our setup-function, so that it can be used before the stack is polluted by the setup function.</p>
 <p>The first extraction looks like this:</p>
 <div class="highlight highlight-rust"><pre>#[no_mangle]
 #[cfg(all(feature = <span class="pl-s">"symbols"</span>, feature = <span class="pl-s">"start"</span>))]
@@ -1049,7 +1049,7 @@ our setup-function, so that we can use it before we start polluting the stack wi
     <span class="pl-k">let</span> argv <span class="pl-k">=</span> stack_ptr.<span class="pl-en">add</span>(<span class="pl-c1">8</span>) <span class="pl-k">as</span> <span class="pl-k">*const</span> <span class="pl-k">*const</span> <span class="pl-k">u8</span>;
     <span class="pl-k">let</span> ptr_size <span class="pl-k">=</span> core<span class="pl-k">::</span>mem<span class="pl-k">::</span><span class="pl-en">size_of</span><span class="pl-k">::</span>&#x3C;<span class="pl-k">usize</span>>();
     <span class="pl-c">// Directly followed by a pointer to the environment variables, it's just a null terminated string.</span>
-    <span class="pl-c">// This isn't specified in Posix and is not great for portability, but we're targeting Linux so it's fine</span>
+    <span class="pl-c">// This isn't specified in Posix and is not great for portability, but this isn't meant to be portable outside of Linux.</span>
     <span class="pl-k">let</span> env_offset <span class="pl-k">=</span> <span class="pl-c1">8</span> <span class="pl-k">+</span> argc <span class="pl-k">as</span> <span class="pl-k">usize</span> <span class="pl-k">*</span> ptr_size <span class="pl-k">+</span> ptr_size;
     <span class="pl-c">// Bump pointer by combined offset</span>
     <span class="pl-k">let</span> envp <span class="pl-k">=</span> stack_ptr.<span class="pl-en">add</span>(env_offset) <span class="pl-k">as</span> <span class="pl-k">*const</span> <span class="pl-k">*const</span> <span class="pl-k">u8</span>;
@@ -1067,9 +1067,9 @@ our setup-function, so that we can use it before we start polluting the stack wi
 </pre></div>
 <p>This works all the same as a <code>pie</code> because:</p>
 <h2>Prelude, inline</h2>
-<p>We will only run into trouble when trying to find a symbol contained in the binary, such as a function call.<br>
-Up to here, that hasn't been a problem because even though we invoke <code>ptr::add()</code> and <code>core::mem:size_of::&#x3C;T>()</code> we don't
-need any addresses. This is because of inlining.</p>
+<p>There will be trouble when trying to find a symbol contained in the binary, such as a function call.<br>
+Up to here, that hasn't been a problem because even though <code>ptr::add()</code> and <code>core::mem:size_of::&#x3C;T>()</code> is invoked,
+no addresses are needed for those. This is because of inlining.</p>
 <p>Looking at <code>core::mem::size_of&#x3C;T>()</code>:</p>
 <div class="highlight highlight-rust"><pre>#[inline(always)]
 #[must_use]
@@ -1081,8 +1081,8 @@ need any addresses. This is because of inlining.</p>
     intrinsics<span class="pl-k">::</span><span class="pl-en">size_of</span><span class="pl-k">::</span>&#x3C;T>()
 }
 </pre></div>
-<p>it has <code>#[inline(always)]</code>, the same goes for <code>ptr::add()</code>. Since that code is inlined, we don't need to have an address
-to a function, and therefore it works even though all of our addresses are off.</p>
+<p>It has the <code>#[inline(always)]</code> attribute, the same goes for <code>ptr::add()</code>. Since that code is inlined,
+an address to a function isn't necessary, and therefore it works even though all of the addresses are off.</p>
 <p>To be able to debug, I would like to be able to print variables, since I haven't been able to hook a debugger up
 to <code>tiny-std</code> executables yet. But, printing to the terminal requires code, code that usually isn't <code>#[inline(always)]</code>.</p>
 <p>So I wrote a small print:</p>
@@ -1127,20 +1127,20 @@ trailing zeroes.</p>
 }
 </pre></div>
 <h2>Relocation</h2>
-<p>Now that basic debug-printing is possible we can start working on relocating the addresses.</p>
+<p>Now that basic debug-printing is possible work to relocate the addresses can begin.</p>
 <p>I previously had written some code the extract <code>aux</code>-values, but now that code needs to run without using any
 non-inlined functions or variables.</p>
 <h3>Aux values</h3>
 <p>A good description of aux-values comes from <a href="https://man7.org/linux/man-pages/man3/getauxval.3.html">the docs here</a>,
 in short the kernel puts some data in the memory of a program when it's loaded.<br>
-This data points to other data that we'll need to do relocation. It also has an insane layout for reasons that
+This data points to other data that is needed to do relocation. It also has an insane layout for reasons that
 I haven't yet been able to find any motivation for.<br>
 A pointer to the aux-values are put after the <code>envp</code> on the stack.</p>
 <p>The aux-values were collected and stored pretty sloppily as a global static variable before implementing this change,
 this time it needs to be collected onto the stack, used for finding the dynamic relocation addresses,
-and then it could be put into a static variable after that (since we can't find the address of the static variable before
+and then it could be put into a static variable after that (since the address of the static variable can't be found before
 remapping).</p>
-<p>We'll also need the <code>dyn</code>-values, which are essentially the same as aux-values, provided for <code>DYN</code>-objects.</p>
+<p>The <code>dyn</code>-values are also required, which are essentially the same as aux-values, provided for <code>DYN</code>-objects.</p>
 <p>In musl, the aux-values that are put on the stack looks like this:</p>
 <div class="highlight highlight-c"><pre><span class="pl-c1">size_t</span> i, aux[AUX_CNT], dyn[DYN_CNT];
 </pre></div>
@@ -1150,14 +1150,14 @@ remapping).</p>
 </pre></div>
 <p>And then initialize it, with the <code>aux</code>-pointer provided by the OS.</p>
 <p>The OS-supplies some values in the <code>aux</code>-vector <a href="https://man7.org/linux/man-pages/man3/getauxval.3.html">more info here</a>
-than we'll need:</p>
+the necessary ones for remapping are:</p>
 <ol>
 <li><code>AT_BASE</code> the base address of the program interpreter, 0 if no interpreter (static-pie).</li>
 <li><code>AT_PHNUM</code>, the number of program headers.</li>
 <li><code>AT_PHENT</code>, the size of one program header entry.</li>
 <li><code>AT_PHDR</code>, the address of the program headers in the executable.</li>
 </ol>
-<p>First we need to find the virtual address found at the program header that has the <code>dynamic</code> type.</p>
+<p>First a virtual address found at the program header that has the <code>dynamic</code> type must be found.</p>
 <p>The program header is laid out in memory as this struct:</p>
 <div class="highlight highlight-rust"><pre>#[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -1172,20 +1172,20 @@ than we'll need:</p>
     <span class="pl-k">pub</span> p_align: Elf64_Xword,
 }
 </pre></div>
-<p>We'll treat the address of the <code>AT_PHDR</code> as an array that we could declare as:</p>
+<p>The address of the <code>AT_PHDR</code> can be treated as an array declared as:</p>
 <div class="highlight highlight-rust"><pre><span class="pl-k">let</span> phdr: <span class="pl-k">&#x26;</span>[elf64_phdr; AT_PHNUM] <span class="pl-k">=</span> ...
 </pre></div>
-<p>We can then walk that array until we find a program header struct with <code>p_type</code> = <code>PT_DYNAMIC</code>,
-that program header holds an offset at <code>p_vaddr</code> that we can subtract from the <code>dynv</code> pointer to get
-our correct <code>base</code> address.</p>
+<p>That array can be walked until finding a program header struct with <code>p_type</code> = <code>PT_DYNAMIC</code>,
+that program header holds an offset at <code>p_vaddr</code> that can be subtracted from the <code>dynv</code> pointer to get
+the correct <code>base</code> address.</p>
 <h2>Initialize the dyn section</h2>
 <p>The <code>dynv</code> pointer supplied by the os, as previously stated, it is analogous to the <code>aux</code>-pointer but
-if we try to stack allocate its value mappings like this:</p>
+trying to stack allocate its value mappings like this:</p>
 <div class="highlight highlight-rust"><pre><span class="pl-k">let</span> dyn_values <span class="pl-k">=</span> [<span class="pl-c1">0usize</span>; <span class="pl-c1">37</span>];
 </pre></div>
-<p>It will cause a segfault.</p>
+<p>Will cause a segfault.</p>
 <h3>SYMBOLS!!!</h3>
-<p>It took me a while to figure out what's happening, when you allocate a zeroed array in rust, and
+<p>It took me a while to figure out what's happening, a zeroed array is allocated in rust, and
 that array is larger than <code>[0usize; 32]</code> (256 bytes of zeroes seems to be the exact breakpoint)
 <code>rustc</code> instead of using <code>sse</code> instructions, uses <code>memset</code> to zero the memory it just took off the stack.</p>
 <p>The asm will look like this:</p>
@@ -1240,7 +1240,8 @@ The unpacked aux values now look like this:</p>
     rela_sz: <span class="pl-k">usize</span>,
 }
 </pre></div>
-<p>Now that we've sidestepped <code>rustc</code>'s memset emissions, we can fill that struct with the values from the <code>dynv</code>-pointer, and then finally relocate:</p>
+<p>Now that <code>rustc</code>'s memset emissions has been sidestepped, the <code>DynSection</code> struct can be filled with the values from the
+<code>dynv</code>-pointer, and then finally the symbols can be relocated:</p>
 <div class="highlight highlight-rust"><pre>#[inline(always)]
 <span class="pl-k">pub</span>(<span class="pl-k">crate</span>) <span class="pl-k">unsafe</span> <span class="pl-k">fn</span> <span class="pl-en">relocate</span>(<span class="pl-k">&#x26;</span><span class="pl-c1">self</span>, base_addr: <span class="pl-k">usize</span>) {
     <span class="pl-c">// Relocate all rel-entries</span>
@@ -1264,7 +1265,7 @@ The unpacked aux values now look like this:</p>
     <span class="pl-c">// Skip implementing relr-entries for now</span>
 }
 </pre></div>
-<p>After the <code>relocate</code>-section runs, we can again use <code>symbols</code>, and <code>tiny-std</code> can continue with the setup.</p>
+<p>After the <code>relocate</code>-section runs, <code>symbols</code> can again be used, and <code>tiny-std</code> can continue with the setup.</p>
 <h2>Outro</h2>
 <p>The commit that added the functionality can be found <a href="https://github.com/MarcusGrass/tiny-std/commit/fce20899b891cb07913800dc63fae991f758a819">here</a>.</p>
 <p>Thanks for reading!</p>

@@ -84,21 +84,21 @@ The assembly prepares the stack by aligning it, putting the stack pointer into a
 then adds the offset off `_DYNAMIC` to the special purpose `rip`-register address, and puts that in `rsi` which becomes 
 our called function's arg 2.
 
-Then we call `__proxy_main`, the signature looks like this:
+After that `__proxy_main` is called, the signature looks like this:
 
 `unsafe extern "C" fn __proxy_main(stack_ptr: *const u8, dynv: *const usize)` 
-It takes the `stack_ptr` and the `dynv`-dynamic vector as arguments, which we provided in 
+It takes the `stack_ptr` and the `dynv`-dynamic vector as arguments, which were provided in 
 the above assembly.
 
 I wrote more about the `_start`-function in [pgwm03](/pgwm03) and [fasterthanli.me](https://fasterthanli.me/series/making-our-own-executable-packer/part-12) 
 wrote more about it at their great blog, but in short:
 
-Before running the user's `main` we need to set up some stuff, like arguments, environment variables, [aux-values](https://man7.org/linux/man-pages/man3/getauxval.3.html), 
+Before running the user's `main` some setup is required, like arguments, environment variables, [aux-values](https://man7.org/linux/man-pages/man3/getauxval.3.html), 
 map in faster functions from the vdso (see [pgwm03](/pgwm03) for more on that), and set up some thread-state, 
 see [the thread writeup](/threads) for that.  
 
-All these variables come off the executable's stack, which is why we need to pass the stack pointer as an argument to 
-our setup-function, so that we can use it before we start polluting the stack with our own stuff.  
+All these variables come off the executable's stack, which is why stack pointer needs to be passed as an argument to 
+our setup-function, so that it can be used before the stack is polluted by the setup function.  
 
 The first extraction looks like this:
 
@@ -112,7 +112,7 @@ unsafe extern "C" fn __proxy_main(stack_ptr: *const u8, dynv: *const usize) {
     let argv = stack_ptr.add(8) as *const *const u8;
     let ptr_size = core::mem::size_of::<usize>();
     // Directly followed by a pointer to the environment variables, it's just a null terminated string.
-    // This isn't specified in Posix and is not great for portability, but we're targeting Linux so it's fine
+    // This isn't specified in Posix and is not great for portability, but this isn't meant to be portable outside of Linux.
     let env_offset = 8 + argc as usize * ptr_size + ptr_size;
     // Bump pointer by combined offset
     let envp = stack_ptr.add(env_offset) as *const *const u8;
@@ -134,9 +134,9 @@ This works all the same as a `pie` because:
 
 ## Prelude, inline
 
-We will only run into trouble when trying to find a symbol contained in the binary, such as a function call.  
-Up to here, that hasn't been a problem because even though we invoke `ptr::add()` and `core::mem:size_of::<T>()` we don't 
-need any addresses. This is because of inlining. 
+There will be trouble when trying to find a symbol contained in the binary, such as a function call.  
+Up to here, that hasn't been a problem because even though `ptr::add()` and `core::mem:size_of::<T>()` is invoked,
+no addresses are needed for those. This is because of inlining. 
 
 Looking at `core::mem::size_of<T>()`:  
 
@@ -152,8 +152,8 @@ pub const fn size_of<T>() -> usize {
 }
 ```
 
-it has `#[inline(always)]`, the same goes for `ptr::add()`. Since that code is inlined, we don't need to have an address 
-to a function, and therefore it works even though all of our addresses are off.
+It has the `#[inline(always)]` attribute, the same goes for `ptr::add()`. Since that code is inlined, 
+an address to a function isn't necessary, and therefore it works even though all of the addresses are off.
 
 To be able to debug, I would like to be able to print variables, since I haven't been able to hook a debugger up 
 to `tiny-std` executables yet. But, printing to the terminal requires code, code that usually isn't `#[inline(always)]`. 
@@ -211,7 +211,7 @@ fn test() {
 ```
 
 ## Relocation
-Now that basic debug-printing is possible we can start working on relocating the addresses.  
+Now that basic debug-printing is possible work to relocate the addresses can begin.  
 
 I previously had written some code the extract `aux`-values, but now that code needs to run without using any 
 non-inlined functions or variables.  
@@ -219,16 +219,16 @@ non-inlined functions or variables.
 ### Aux values
 A good description of aux-values comes from [the docs here](https://man7.org/linux/man-pages/man3/getauxval.3.html), 
 in short the kernel puts some data in the memory of a program when it's loaded.  
-This data points to other data that we'll need to do relocation. It also has an insane layout for reasons that 
+This data points to other data that is needed to do relocation. It also has an insane layout for reasons that 
 I haven't yet been able to find any motivation for.  
 A pointer to the aux-values are put after the `envp` on the stack.  
 
 The aux-values were collected and stored pretty sloppily as a global static variable before implementing this change, 
 this time it needs to be collected onto the stack, used for finding the dynamic relocation addresses, 
-and then it could be put into a static variable after that (since we can't find the address of the static variable before 
+and then it could be put into a static variable after that (since the address of the static variable can't be found before
 remapping).
 
-We'll also need the `dyn`-values, which are essentially the same as aux-values, provided for `DYN`-objects.
+The `dyn`-values are also required, which are essentially the same as aux-values, provided for `DYN`-objects.
 
 In musl, the aux-values that are put on the stack looks like this:
 ```c 
@@ -245,14 +245,14 @@ let mut aux: [0usize; 32];
 And then initialize it, with the `aux`-pointer provided by the OS.  
 
 The OS-supplies some values in the `aux`-vector [more info here](https://man7.org/linux/man-pages/man3/getauxval.3.html) 
-than we'll need:
+the necessary ones for remapping are:
 
 1. `AT_BASE` the base address of the program interpreter, 0 if no interpreter (static-pie).
 2. `AT_PHNUM`, the number of program headers.
 3. `AT_PHENT`, the size of one program header entry.
 4. `AT_PHDR`, the address of the program headers in the executable.  
 
-First we need to find the virtual address found at the program header that has the `dynamic` type.  
+First a virtual address found at the program header that has the `dynamic` type must be found.  
 
 The program header is laid out in memory as this struct: 
 
@@ -271,28 +271,28 @@ pub struct elf64_phdr {
 }
 ```
 
-We'll treat the address of the `AT_PHDR` as an array that we could declare as: 
+The address of the `AT_PHDR` can be treated as an array declared as:  
 
 ```rust
 let phdr: &[elf64_phdr; AT_PHNUM] = ...
 ```
 
-We can then walk that array until we find a program header struct with `p_type` = `PT_DYNAMIC`, 
-that program header holds an offset at `p_vaddr` that we can subtract from the `dynv` pointer to get 
-our correct `base` address.  
+That array can be walked until finding a program header struct with `p_type` = `PT_DYNAMIC`, 
+that program header holds an offset at `p_vaddr` that can be subtracted from the `dynv` pointer to get 
+the correct `base` address.  
 
 ## Initialize the dyn section
 The `dynv` pointer supplied by the os, as previously stated, it is analogous to the `aux`-pointer but 
-if we try to stack allocate its value mappings like this:
+trying to stack allocate its value mappings like this:
 
 ```rust
 let dyn_values = [0usize; 37];
 ```
 
-It will cause a segfault.
+Will cause a segfault.
 
 ### SYMBOLS!!!
-It took me a while to figure out what's happening, when you allocate a zeroed array in rust, and 
+It took me a while to figure out what's happening, a zeroed array is allocated in rust, and 
 that array is larger than `[0usize; 32]` (256 bytes of zeroes seems to be the exact breakpoint) 
 `rustc` instead of using `sse` instructions, uses `memset` to zero the memory it just took off the stack.  
 
@@ -367,7 +367,8 @@ pub(crate) struct DynSection {
 }
 ```
 
-Now that we've sidestepped `rustc`'s memset emissions, we can fill that struct with the values from the `dynv`-pointer, and then finally relocate: 
+Now that `rustc`'s memset emissions has been sidestepped, the `DynSection` struct can be filled with the values from the 
+`dynv`-pointer, and then finally the symbols can be relocated: 
 
 ```rust
 #[inline(always)]
@@ -394,7 +395,7 @@ pub(crate) unsafe fn relocate(&self, base_addr: usize) {
 }
 ```
 
-After the `relocate`-section runs, we can again use `symbols`, and `tiny-std` can continue with the setup.
+After the `relocate`-section runs, `symbols` can again be used, and `tiny-std` can continue with the setup.
 
 ## Outro
 The commit that added the functionality can be found [here](https://github.com/MarcusGrass/tiny-std/commit/fce20899b891cb07913800dc63fae991f758a819).  
