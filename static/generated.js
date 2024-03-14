@@ -8,6 +8,7 @@ const Location = Object.freeze({
 	PGWM04: {"path": "/pgwm04", "name": "Pgwm04"},
 	THREADS: {"path": "/threads", "name": "Threads"},
 	STATICPIE: {"path": "/static-pie", "name": "StaticPie"},
+	KBDSMP: {"path": "/kbd-smp", "name": "KbdSmp"},
 	TEST: {"path": "/test", "name": "Test"},
 });
 
@@ -52,6 +53,7 @@ I made things easier for myself and made navigation happen through this md-page 
 <li><a class="self-link" onclick=page_navigate("/pgwm04")>Pgwm04 - Wm runs on stable, uses io_uring</a></li>
 <li><a class="self-link" onclick=page_navigate("/threads")>Threads - Tiny-std has threading support</a></li>
 <li><a class="self-link" onclick=page_navigate("/static-pie")>Static pie - Tiny-std can compile as static-pie</a></li>
+<li><a class="self-link" onclick=page_navigate("/kbd-smp")>Keyboard SMP - Multithreading in your keyboard</a></li>
 <li><a class="self-link" onclick=page_navigate("/test")>Test</a></li>
 </ul>
 </div>`;
@@ -348,6 +350,144 @@ The bootloader cannot be exchanged without extracting my setup password.</p>
 Once set up it's pretty easy to re-compile and re-encrypt the kernel when it's time to upgrade.</p>
 <p>Thanks for reading!</p>
 </div>`;
+const KBDSMP_HTML = String.raw`<div class="markdown-body"><h1>Symmetric multiprocessing in your keyboard</h1>
+<p>While my daughter sleeps during my parental leave I manage to get up to
+more than I thought I would, this time, a deep-dive into <a href="https://docs.qmk.fm/#/">QMK</a>.</p>
+<h2>QMK and custom keyboards</h2>
+<p><code>QMK</code> contains open source firmware for keyboards, it provides implementations for most custom keyboard functionality,
+like kepyresses (that one's obvious), rotary encoders, and oled screens.</p>
+<p>It can be thought of as an OS for your keyboard, which can be configured by plain <code>json</code>,
+with <a href="https://config.qmk.fm/#/xelus/kangaroo/rev1/LAYOUT_ansi_split_bs_rshift">online tools</a>, and other
+simple tools that you don't need to be able to program to use.</p>
+<p>But, you can also get right into it if you want, which is where it gets interesting.</p>
+<h2>Qmk structure</h2>
+<p>Saying that <code>QMK</code> is like an OS for your keyboard might drive some pedantics mad, since <code>QMK</code> packages
+an OS and installs it configured on your keyboard, with your additions.</p>
+<p>Most features are toggled by defining constants in different <code>make</code> or header files, like:</p>
+<div class="highlight highlight-c"><pre>#<span class="pl-k">pragma</span> once
+<span class="pl-c">// Millis</span>
+#<span class="pl-k">define</span> <span class="pl-en">OLED_UPDATE_INTERVAL</span> <span class="pl-c1">50</span>
+#<span class="pl-k">define</span> <span class="pl-en">OLED_SCROLL_TIMEOUT</span> <span class="pl-c1">0</span>
+#<span class="pl-k">define</span> <span class="pl-en">ENCODER_RESOLUTION</span> <span class="pl-c1">2</span>
+<span class="pl-c">// Need to propagate oled data to right side</span>
+#<span class="pl-k">define</span> <span class="pl-en">SPLIT_TRANSACTION_IDS_USER</span> OLED_DATA_SYNC
+</pre></div>
+<p>It also exposes some API's which provide curated functionality,
+here's an example from the <a href="https://github.com/qmk/qmk_firmware/blob/master/drivers/oled/oled_driver.h">oled driver</a>:</p>
+<div class="highlight highlight-c"><pre><span class="pl-c">// Writes a string to the buffer at current cursor position</span>
+<span class="pl-c">// Advances the cursor while writing, inverts the pixels if true</span>
+<span class="pl-k">void</span> <span class="pl-en">oled_write</span>(<span class="pl-k">const</span> <span class="pl-k">char</span> *data, <span class="pl-k">bool</span> invert);
+</pre></div>
+<p>Above is an API that allows you to write text to an <code>oled</code> screen, very convenient.</p>
+<p>Crucially, <code>QMK</code> does actually ship an OS, in my case <a href="https://chibiforge.org/doc/21.11/full_rm/">chibios</a>,
+which is a full-featured <a href="https://en.wikipedia.org/wiki/Real-time_operating_system">RTOS</a>. That OS contains
+the drivers for my microcontrollers, and from my custom code, I can interface with
+the operating system.</p>
+<h2>Keyboards keyboards keyboards</h2>
+<p>I have been building keyboards since I started working as a programmer,
+there is much that can be said about them, but not a lot of is particularly interesting, I'll give a brief
+explanation of how they work.</p>
+<h3>Keyboard internals</h3>
+<p>A keyboard is like a tiny computer that tells the OS (The other one, the one not in the keyboard)
+what keys are being pressed.</p>
+<p>Here are three arbitrarily chosen important components to a keyboard:</p>
+<ol>
+<li>The <a href="https://en.wikipedia.org/wiki/Printed_circuit_board">Printed Circuit Board (PCB)</a>, it's a large
+chip that connects all the keyboard components, if you're thinking: "Hey that's a motherboard!", then you
+aren't far off. Split keyboards (usually) have two PCBs working in tandem, connected by (usually) an aux cable.</li>
+<li>The microcontroller, the actual computer part that you program. It can be integrated directly with the PCB,
+or soldered on to it.</li>
+<li><a href="https://en.wikipedia.org/wiki/Keyboard_technology#Notable_switch_mechanisms">The switches</a>,
+the things that when pressed connects circuits on the PCB, which the microcontroller can see
+and interpret as a key being pressed.</li>
+</ol>
+<h2>Back to the story</h2>
+<p>I used an <a href="https://keeb.io/collections/iris-split-ergonomic-keyboard">Iris</a> for years and loved it, but since some pretty impressive microcontrollers that aren't <a href="https://en.wikipedia.org/wiki/AVR_microcontrollers">AVR</a>,
+but <a href="https://en.wikipedia.org/wiki/ARM_architecture_family">ARM</a> came out, surpassing the AVR ones in cost-efficiency, memory, and speed, while being compatible,
+I felt I needed an upgrade.</p>
+<p>A colleague tipped me off about <a href="https://splitkb.com/products/aurora-lily58">lily58</a>, which takes any<a href="https://github.com/sparkfun/Pro_Micro">pro-micro</a>-compatible microcontroller,
+so I bought it. Alongside a couple of <a href="https://www.raspberrypi.com/documentation/microcontrollers/rp2040.html">RP2040</a>-based microcontrollers.</p>
+<h3>RP2040 and custom microcontrollers</h3>
+<p>Another slight derailment, the RP2040 microcontroller is a microcontroller with an
+<a href="https://developer.arm.com/Processors/Cortex-M0-Plus">Arm-cortex-m0+ cpu</a>. Keyboard-makers take this kind
+of microcontroller, and customize them to fit keyboards, since pro-micro microcontrollers have influenced a lot
+of the keyboard PCBs, many new microcontroller designs fit onto a PCB the same way that a pro-micro does. Meaning,
+often times you can use many combinations of microcontrollers, with many combinations of PCBs.</p>
+<p>The arm-cortex-m0+ cpu is pretty fast, cheap, and has two cores, TWO CORES, why would someone even need that?
+If there are two cores on there, then they should both definitely be used, however.</p>
+<h2>Back to the story, pt2</h2>
+<p>I was finishing up my keyboard and realized that <code>oled</code>-rendering is by default set to 50ms, to not impact
+matrix scan rate. (The matrix scan rate is when the microcontroller checks the PCB for what keys are being held down,
+if it takes too long it may impact the core functionality of key-pressing and releasing being registered correctly).</p>
+<p>Now I found the purpose of multicore, if rendering to the oled takes time,
+then that job could (and therefore should) be shoveled onto a
+different thread, my keyboard has 2 cores, I should parallelize this by using a thread!</p>
+<h2>Chibios and threading</h2>
+<p>Chibios is very well documented, it even
+<a href="https://chibiforge.org/doc/21.11/full_rm/group__threads.html">has a section on threading</a>, and it even has a
+convenience function for
+<a href="https://chibiforge.org/doc/21.11/full_rm/group__threads.html#gabf1ded9244472b99cef4dfa54caecec4">spawning a static thread</a>.</p>
+<p>It can be used like this:</p>
+<div class="highlight highlight-c"><pre><span class="pl-k">static</span> <span class="pl-en">THD_WORKING_AREA</span>(my_thread_area, <span class="pl-c1">512</span>);
+<span class="pl-k">static</span> <span class="pl-en">THD_FUNCTION</span>(my_thread_fn, arg) {
+    <span class="pl-c">// Cool function body</span>
+}
+<span class="pl-k">void</span> <span class="pl-en">start_worker</span>(<span class="pl-k">void</span>) {
+    <span class="pl-c1">thread_t</span> *thread_ptr = <span class="pl-c1">chThdCreateStatic</span>(my_thread_area, <span class="pl-c1">512</span>, NORMALPRIO, my_thread_fn, <span class="pl-c1">NULL</span>);
+}
+</pre></div>
+<p>Since my CPU has two cores, if I spawn a thread, work will be parallelized, I thought, so I went for it. (This is
+foreshadowing).</p>
+<p>After wrangling some <a href="https://chibiforge.org/doc/21.11/full_rm/group__mutexes.html">mutex locks</a>, and messing
+with the firmware to remove race conditions, I had a multithreaded implementation that could offload rendering
+to the <code>oled</code> display on a separate thread, great! Now why is performance so bad?</p>
+<h2>Multithread != Multicore, an RTOS is not the same as a desktop OS</h2>
+<p>When I printed the core-id of the thread rendering to the <code>oled</code>-display, it was <code>0</code>. I wasn't
+actually using the extra core which would have core-id <code>1</code>.</p>
+<p>The assumption that: If I have two cores and I have two threads, the two threads should be running
+or at least be available to accept tasks almost 100% of the time, does not hold here.
+It would hold up better on a regular OS like <code>Linux</code>, but on <code>Chibios</code> it's a bit more explicit.</p>
+<p><strong>Note:</strong>
+Disregarding that <code>Chibios</code> spawns both a main-thread, and an idle-thread (on the same core) by default, so it's not just one,
+although that's not particularly important to performance.</p>
+<h3>I have two cores, I just have to enable Symmetric multiprocessing</h3>
+<p>I know I have two cores, I'll just have to enable <a href="https://en.wikipedia.org/wiki/Symmetric_multiprocessing">SMP</a>.
+Symmetric multiprocessing means that the processor can actually
+do things in parallel, it's not enabled by default. Chibios has some <a href="https://www.chibios.org/dokuwiki/doku.php?id=chibios:articles:smp_rt7">documentation on this</a>.</p>
+<p>But this time, it wasn't enough. Enabling SMP, is not trivial as it turns out, it needs a config flag for chibios,
+a makeflag when building for the platform (rp2040), and some other fixing.
+So I had to mess with the firmware once more,
+but checking some flags in the code, and some internal structures, I can see that <code>Chibios</code> is now compiled
+ready to use SMP, it even has a reference that I can use to my other core's context <code>&#x26;ch1</code> (<code>&#x26;ch0</code> is core 0).</p>
+<p>On <code>Linux</code> multicore and multithreading is opaque, you spawn a thread, it runs on some core (also assuming that
+SMP is enabled, but it generally is for servers and desktops). On Chibios, if you
+spawn a thread, it runs on the core that spawned it by default.<br>
+Back to the docs, I see that I can instead create a thread from a <a href="https://chibiforge.org/doc/21.11/full_rm/group__threads.html#gad51eb52a2e308ba1cb6e5cd8a337817e">thread descriptor</a>,
+which takes a reference to the instance-context, <code>&#x26;ch1</code>, perfect, now I'll spawn a thread on the other core, happily ever
+after.</p>
+<p><strong>WRONG!</strong></p>
+<p>It still draws from core-0 on the oled.</p>
+<p>Checking the chibios source code, I see that it falls back to <code>&#x26;ch0</code> if <code>&#x26;ch1</code> is null, now why is it null?</p>
+<h3>Main 2, a single main function is for suckers</h3>
+<p>Browsing through the chibios repo I find <a href="https://github.com/ChibiOS/ChibiOS/blob/master/demos/RP/RT-RP2040-PICO/c1_main.c">the next piece of the puzzle</a>,
+a demo someone made of SMP on the RP2040, it needs a separate main function where the instance context (<code>&#x26;ch1</code>)
+for the new core is initialized. I write some shim-code, struggle with some more configuration, and finally,
+core 1 is doing the <code>oled</code> work.</p>
+<p>Performance is magical, it's all worth in it the end.</p>
+<h2>Conclusion</h2>
+<p>My keyboard now runs multicore and I've offloaded all non-trivial
+work to core 1 so that core 0 can do the time-sensitive matrix scanning,
+and I can draw as much and often as I want to the oled display.</p>
+<p>I had to mess a bit with the firmware to specify that there is an extra
+core on the RP2040, and to keep <code>QMK</code>s hands off of oled state, since
+that code isn't thread-safe.</p>
+<p>The code is in my fork <a href="https://github.com/MarcusGrass/qmk_firmware/tree/mg/lily58">here</a>,
+with commits labeled <code>[FIRMWARE]</code> being the ones messing with the firmware.</p>
+<p>The keyboard-specific code is contained
+<a href="https://github.com/MarcusGrass/qmk_firmware/tree/mg/lily58/keyboards/splitkb/aurora/lily58/keymaps/gramar">here</a>,
+on the same branch.</p>
+<p>I hope this was interesting to someone!</p>
+</div>`;
 const META_HTML = String.raw`<div class="markdown-body"><h1>Writing these pages</h1>
 <p>I did a number of rewrites of this web application, some of which could probably be
 found in the repository's history.<br>
@@ -437,10 +577,10 @@ this</p>
 &#x3C;/<span class="pl-ent">div</span>>
 </pre></div>
 <p>Would have to be converted to this:</p>
-<div class="highlight highlight-rust"><pre>yew<span class="pl-k">::</span><span class="pl-en">html!</span> {
-    <span class="pl-k">&#x3C;</span>div<span class="pl-k">></span>
-        {{<span class="pl-s">"Content here"</span>}}
-    <span class="pl-k">&#x3C;/</span>div<span class="pl-k">></span>
+<div class="highlight highlight-rust"><pre><span class="pl-en">yew</span><span class="pl-k">::</span><span class="pl-en">html!</span> {
+    &#x3C;<span class="pl-smi">div</span>>
+        {{<span class="pl-s"><span class="pl-pds">"</span>Content here<span class="pl-pds">"</span></span>}}
+    &#x3C;<span class="pl-k">/</span><span class="pl-smi">div</span>>
 }
 </pre></div>
 <p>Any raw string had to be double bracketed then quoted.<br>
@@ -448,8 +588,8 @@ Additionally, to convert to links, raw <code>html</code> that looked like this:<
 <div class="highlight highlight-text-html-basic"><pre>&#x3C;<span class="pl-ent">a</span> <span class="pl-e">href</span>=<span class="pl-s"><span class="pl-pds">"</span>/test<span class="pl-pds">"</span></span>>Test!&#x3C;/<span class="pl-ent">a</span>>
 </pre></div>
 <p>Would have to be converted to this:</p>
-<div class="highlight highlight-rust"><pre>yew<span class="pl-k">::</span><span class="pl-en">html!</span> {
-    <span class="pl-k">&#x3C;</span>a onclick<span class="pl-k">=</span>{<span class="pl-k">move</span> <span class="pl-k">|</span>_<span class="pl-k">|</span> scope.navigator.<span class="pl-en">unwrap</span>().<span class="pl-en">replace</span>(<span class="pl-k">&#x26;</span>Location<span class="pl-k">::</span>Test)}<span class="pl-k">></span>Test<span class="pl-k">!&#x3C;/</span>a<span class="pl-k">></span>
+<div class="highlight highlight-rust"><pre><span class="pl-en">yew</span><span class="pl-k">::</span><span class="pl-en">html!</span> {
+    &#x3C;<span class="pl-smi">a</span> <span class="pl-smi">onclick</span><span class="pl-k">=</span>{<span class="pl-k">move</span> <span class="pl-k">|</span><span class="pl-smi">_</span><span class="pl-k">|</span> <span class="pl-smi">scope</span><span class="pl-k">.</span>navigator<span class="pl-k">.</span><span class="pl-en">unwrap</span>()<span class="pl-k">.</span><span class="pl-en">replace</span>(<span class="pl-k">&#x26;</span><span class="pl-en">Location</span><span class="pl-k">::</span><span class="pl-en">Test</span>)}><span class="pl-en">Test!</span>&#x3C;<span class="pl-k">/</span><span class="pl-smi">a</span>>
 }
 </pre></div>
 <p>On top of that, the css specifies special styling for <code>&#x3C;a></code> which contains <code>href</code> vs <code>&#x3C;a></code> which doesn't.<br>
@@ -828,50 +968,50 @@ injected, passing that pointer to a normal function that can extract what's nece
 <div class="highlight highlight-rust"><pre><span class="pl-c">/// Binary entrypoint</span>
 #[naked]
 #[no_mangle]
-#[cfg(all(feature = <span class="pl-s">"symbols"</span>, feature = <span class="pl-s">"start"</span>))]
-<span class="pl-k">pub</span> <span class="pl-k">unsafe</span> <span class="pl-k">extern</span> <span class="pl-s">"C"</span> <span class="pl-k">fn</span> <span class="pl-en">_start</span>() {
-    <span class="pl-c">// Naked function making sure that main gets the first stack address as an arg</span>
-    #[cfg(target_arch = <span class="pl-s">"x86_64"</span>)]
+#[cfg(all(feature <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>symbols<span class="pl-pds">"</span></span>, feature <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>start<span class="pl-pds">"</span></span>))]
+<span class="pl-k">pub</span> <span class="pl-k">unsafe</span> <span class="pl-k">extern</span> <span class="pl-s"><span class="pl-pds">"</span>C<span class="pl-pds">"</span></span> <span class="pl-k">fn</span> <span class="pl-en">_start</span>() {
+<span class="pl-c">    // Naked function making sure that main gets the first stack address as an arg</span>
+    #[cfg(target_arch <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>x86_64<span class="pl-pds">"</span></span>)]
     {
-        core<span class="pl-k">::</span>arch<span class="pl-k">::</span><span class="pl-en">asm!</span>(<span class="pl-s">"mov rdi, rsp"</span>, <span class="pl-s">"call __proxy_main"</span>, <span class="pl-en">options</span>(noreturn))
+        <span class="pl-en">core</span><span class="pl-k">::</span><span class="pl-en">arch</span><span class="pl-k">::</span><span class="pl-en">asm!</span>(<span class="pl-s"><span class="pl-pds">"</span>mov rdi, rsp<span class="pl-pds">"</span></span>, <span class="pl-s"><span class="pl-pds">"</span>call __proxy_main<span class="pl-pds">"</span></span>, <span class="pl-en">options</span>(<span class="pl-smi">noreturn</span>))
     }
-    #[cfg(target_arch = <span class="pl-s">"aarch64"</span>)]
+    #[cfg(target_arch <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>aarch64<span class="pl-pds">"</span></span>)]
     {
-        core<span class="pl-k">::</span>arch<span class="pl-k">::</span><span class="pl-en">asm!</span>(<span class="pl-s">"MOV X0, sp"</span>, <span class="pl-s">"bl __proxy_main"</span>, <span class="pl-en">options</span>(noreturn))
+        <span class="pl-en">core</span><span class="pl-k">::</span><span class="pl-en">arch</span><span class="pl-k">::</span><span class="pl-en">asm!</span>(<span class="pl-s"><span class="pl-pds">"</span>MOV X0, sp<span class="pl-pds">"</span></span>, <span class="pl-s"><span class="pl-pds">"</span>bl __proxy_main<span class="pl-pds">"</span></span>, <span class="pl-en">options</span>(<span class="pl-smi">noreturn</span>))
     }
 }
 <span class="pl-c">/// Called with a pointer to the top of the stack</span>
 #[no_mangle]
-#[cfg(all(feature = <span class="pl-s">"symbols"</span>, feature = <span class="pl-s">"start"</span>))]
-<span class="pl-k">unsafe</span> <span class="pl-k">fn</span> <span class="pl-en">__proxy_main</span>(stack_ptr: <span class="pl-k">*const</span> <span class="pl-k">u8</span>) {
-    <span class="pl-c">// Fist 8 bytes is a u64 with the number of arguments</span>
-    <span class="pl-k">let</span> argc <span class="pl-k">=</span> <span class="pl-k">*</span>(stack_ptr <span class="pl-k">as</span> <span class="pl-k">*const</span> <span class="pl-k">u64</span>);
-    <span class="pl-c">// Directly followed by those arguments, bump pointer by 8</span>
-    <span class="pl-k">let</span> argv <span class="pl-k">=</span> stack_ptr.<span class="pl-en">add</span>(<span class="pl-c1">8</span>) <span class="pl-k">as</span> <span class="pl-k">*const</span> <span class="pl-k">*const</span> <span class="pl-k">u8</span>;
-    <span class="pl-k">let</span> ptr_size <span class="pl-k">=</span> core<span class="pl-k">::</span>mem<span class="pl-k">::</span><span class="pl-en">size_of</span><span class="pl-k">::</span>&#x3C;<span class="pl-k">usize</span>>();
-    <span class="pl-c">// Directly followed by a pointer to the environment variables, it's just a null terminated string.</span>
-    <span class="pl-c">// This isn't specified in Posix and is not great for portability, but we're targeting Linux so it's fine</span>
-    <span class="pl-k">let</span> env_offset <span class="pl-k">=</span> <span class="pl-c1">8</span> <span class="pl-k">+</span> argc <span class="pl-k">as</span> <span class="pl-k">usize</span> <span class="pl-k">*</span> ptr_size <span class="pl-k">+</span> ptr_size;
-    <span class="pl-c">// Bump pointer by combined offset</span>
-    <span class="pl-k">let</span> envp <span class="pl-k">=</span> stack_ptr.<span class="pl-en">add</span>(env_offset) <span class="pl-k">as</span> <span class="pl-k">*const</span> <span class="pl-k">*const</span> <span class="pl-k">u8</span>;
+#[cfg(all(feature <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>symbols<span class="pl-pds">"</span></span>, feature <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>start<span class="pl-pds">"</span></span>))]
+<span class="pl-k">unsafe</span> <span class="pl-k">fn</span> <span class="pl-en">__proxy_main</span>(<span class="pl-smi">stack_ptr</span><span class="pl-k">:</span> <span class="pl-k">*const</span> <span class="pl-en">u8</span>) {
+<span class="pl-c">    // Fist 8 bytes is a u64 with the number of arguments</span>
+    <span class="pl-k">let</span> <span class="pl-smi">argc</span> <span class="pl-k">=</span> <span class="pl-k">*</span>(<span class="pl-smi">stack_ptr</span> <span class="pl-k">as</span> <span class="pl-k">*const</span> <span class="pl-en">u64</span>);
+<span class="pl-c">    // Directly followed by those arguments, bump pointer by 8</span>
+    <span class="pl-k">let</span> <span class="pl-smi">argv</span> <span class="pl-k">=</span> <span class="pl-smi">stack_ptr</span><span class="pl-k">.</span><span class="pl-en">add</span>(<span class="pl-c1">8</span>) <span class="pl-k">as</span> <span class="pl-k">*const</span> <span class="pl-k">*const</span> <span class="pl-en">u8</span>;
+    <span class="pl-k">let</span> <span class="pl-smi">ptr_size</span> <span class="pl-k">=</span> <span class="pl-en">core</span><span class="pl-k">::</span><span class="pl-en">mem</span><span class="pl-k">::</span><span class="pl-en">size_of</span><span class="pl-k">::</span>&#x3C;<span class="pl-en">usize</span>>();
+<span class="pl-c">    // Directly followed by a pointer to the environment variables, it's just a null terminated string.</span>
+<span class="pl-c">    // This isn't specified in Posix and is not great for portability, but we're targeting Linux so it's fine</span>
+    <span class="pl-k">let</span> <span class="pl-smi">env_offset</span> <span class="pl-k">=</span> <span class="pl-c1">8</span> <span class="pl-k">+</span> <span class="pl-smi">argc</span> <span class="pl-k">as</span> <span class="pl-en">usize</span> <span class="pl-k">*</span> <span class="pl-smi">ptr_size</span> <span class="pl-k">+</span> <span class="pl-smi">ptr_size</span>;
+<span class="pl-c">    // Bump pointer by combined offset</span>
+    <span class="pl-k">let</span> <span class="pl-smi">envp</span> <span class="pl-k">=</span> <span class="pl-smi">stack_ptr</span><span class="pl-k">.</span><span class="pl-en">add</span>(<span class="pl-smi">env_offset</span>) <span class="pl-k">as</span> <span class="pl-k">*const</span> <span class="pl-k">*const</span> <span class="pl-en">u8</span>;
     <span class="pl-k">unsafe</span> {
-        ENV.arg_c <span class="pl-k">=</span> argc;
-        ENV.arg_v <span class="pl-k">=</span> argv;
-        ENV.env_p <span class="pl-k">=</span> envp;
+        <span class="pl-c1">ENV</span><span class="pl-k">.</span>arg_c <span class="pl-k">=</span> <span class="pl-smi">argc</span>;
+        <span class="pl-c1">ENV</span><span class="pl-k">.</span>arg_v <span class="pl-k">=</span> <span class="pl-smi">argv</span>;
+        <span class="pl-c1">ENV</span><span class="pl-k">.</span>env_p <span class="pl-k">=</span> <span class="pl-smi">envp</span>;
     }
-    ...etc
+    <span class="pl-k">...</span><span class="pl-smi">etc</span>
 </pre></div>
 <p>I got this from an article by <a href="https://fasterthanli.me/">fasterthanli.me</a>. But later realized that
 you can use the <code>global_asm</code>-macro to generate the full function instead:</p>
 <div class="highlight highlight-rust"><pre><span class="pl-c">// Binary entrypoint</span>
-#[cfg(all(feature = <span class="pl-s">"symbols"</span>, feature = <span class="pl-s">"start"</span>, target_arch = <span class="pl-s">"x86_64"</span>))]
-core<span class="pl-k">::</span>arch<span class="pl-k">::</span><span class="pl-en">global_asm!</span>(
-    <span class="pl-s">".text"</span>,
-    <span class="pl-s">".global _start"</span>,
-    <span class="pl-s">".type _start,@function"</span>,
-    <span class="pl-s">"_start:"</span>,
-    <span class="pl-s">"mov rdi, rsp"</span>,
-    <span class="pl-s">"call __proxy_main"</span>
+#[cfg(all(feature <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>symbols<span class="pl-pds">"</span></span>, feature <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>start<span class="pl-pds">"</span></span>, target_arch <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>x86_64<span class="pl-pds">"</span></span>))]
+<span class="pl-en">core</span><span class="pl-k">::</span><span class="pl-en">arch</span><span class="pl-k">::</span><span class="pl-en">global_asm!</span>(
+    <span class="pl-s"><span class="pl-pds">"</span>.text<span class="pl-pds">"</span></span>,
+    <span class="pl-s"><span class="pl-pds">"</span>.global _start<span class="pl-pds">"</span></span>,
+    <span class="pl-s"><span class="pl-pds">"</span>.type _start,@function<span class="pl-pds">"</span></span>,
+    <span class="pl-s"><span class="pl-pds">"</span>_start:<span class="pl-pds">"</span></span>,
+    <span class="pl-s"><span class="pl-pds">"</span>mov rdi, rsp<span class="pl-pds">"</span></span>,
+    <span class="pl-s"><span class="pl-pds">"</span>call __proxy_main<span class="pl-pds">"</span></span>
 );
 </pre></div>
 <h3>Symbols</h3>
@@ -1009,19 +1149,19 @@ function calls (kinda).</p>
 <h2>The start function</h2>
 <p>The executable enters through the <code>_start</code> function, this is defined in <code>asm</code> for <code>tiny-std</code>:</p>
 <div class="highlight highlight-rust"><pre><span class="pl-c">// Binary entrypoint</span>
-#[cfg(all(feature = <span class="pl-s">"symbols"</span>, feature = <span class="pl-s">"start"</span>, target_arch = <span class="pl-s">"x86_64"</span>))]
-core<span class="pl-k">::</span>arch<span class="pl-k">::</span><span class="pl-en">global_asm!</span>(
-    <span class="pl-s">".text"</span>,
-    <span class="pl-s">".global _start"</span>,
-    <span class="pl-s">".type _start,@function"</span>,
-    <span class="pl-s">"_start:"</span>,
-    <span class="pl-s">"xor rbp,rbp"</span>, <span class="pl-c">// Zero the stack-frame pointer</span>
-    <span class="pl-s">"mov rdi, rsp"</span>, <span class="pl-c">// Move the stack pointer into rdi, c-calling convention arg 1</span>
-    <span class="pl-s">".weak _DYNAMIC"</span>, <span class="pl-c">// Elf dynamic symbol</span>
-    <span class="pl-s">".hidden _DYNAMIC"</span>,
-    <span class="pl-s">"lea rsi, [rip + _DYNAMIC]"</span>, <span class="pl-c">// Load the dynamic address off the next instruction to execute incremented by _DYNAMIC into rsi</span>
-    <span class="pl-s">"and rsp,-16"</span>, <span class="pl-c">// Align the stack pointer</span>
-    <span class="pl-s">"call __proxy_main"</span> <span class="pl-c">// Call our rust start function</span>
+#[cfg(all(feature <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>symbols<span class="pl-pds">"</span></span>, feature <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>start<span class="pl-pds">"</span></span>, target_arch <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>x86_64<span class="pl-pds">"</span></span>))]
+<span class="pl-en">core</span><span class="pl-k">::</span><span class="pl-en">arch</span><span class="pl-k">::</span><span class="pl-en">global_asm!</span>(
+    <span class="pl-s"><span class="pl-pds">"</span>.text<span class="pl-pds">"</span></span>,
+    <span class="pl-s"><span class="pl-pds">"</span>.global _start<span class="pl-pds">"</span></span>,
+    <span class="pl-s"><span class="pl-pds">"</span>.type _start,@function<span class="pl-pds">"</span></span>,
+    <span class="pl-s"><span class="pl-pds">"</span>_start:<span class="pl-pds">"</span></span>,
+    <span class="pl-s"><span class="pl-pds">"</span>xor rbp,rbp<span class="pl-pds">"</span></span>,<span class="pl-c"> // Zero the stack-frame pointer</span>
+    <span class="pl-s"><span class="pl-pds">"</span>mov rdi, rsp<span class="pl-pds">"</span></span>,<span class="pl-c"> // Move the stack pointer into rdi, c-calling convention arg 1</span>
+    <span class="pl-s"><span class="pl-pds">"</span>.weak _DYNAMIC<span class="pl-pds">"</span></span>,<span class="pl-c"> // Elf dynamic symbol</span>
+    <span class="pl-s"><span class="pl-pds">"</span>.hidden _DYNAMIC<span class="pl-pds">"</span></span>,
+    <span class="pl-s"><span class="pl-pds">"</span>lea rsi, [rip + _DYNAMIC]<span class="pl-pds">"</span></span>,<span class="pl-c"> // Load the dynamic address off the next instruction to execute incremented by _DYNAMIC into rsi</span>
+    <span class="pl-s"><span class="pl-pds">"</span>and rsp,-16<span class="pl-pds">"</span></span>,<span class="pl-c"> // Align the stack pointer</span>
+    <span class="pl-s"><span class="pl-pds">"</span>call __proxy_main<span class="pl-pds">"</span></span><span class="pl-c"> // Call our rust start function</span>
 );
 </pre></div>
 <p>The assembly prepares the stack by aligning it, putting the stack pointer into arg1 for the coming function-call,
@@ -1040,28 +1180,28 @@ see <a class="self-link" onclick=page_navigate("/threads")>the thread writeup</a
 our setup-function, so that it can be used before the stack is polluted by the setup function.</p>
 <p>The first extraction looks like this:</p>
 <div class="highlight highlight-rust"><pre>#[no_mangle]
-#[cfg(all(feature = <span class="pl-s">"symbols"</span>, feature = <span class="pl-s">"start"</span>))]
-<span class="pl-k">unsafe</span> <span class="pl-k">extern</span> <span class="pl-s">"C"</span> <span class="pl-k">fn</span> <span class="pl-en">__proxy_main</span>(stack_ptr: <span class="pl-k">*const</span> <span class="pl-k">u8</span>, dynv: <span class="pl-k">*const</span> <span class="pl-k">usize</span>) {
-    <span class="pl-c">// Fist 8 bytes is a u64 with the number of arguments</span>
-    <span class="pl-k">let</span> argc <span class="pl-k">=</span> <span class="pl-k">*</span>(stack_ptr <span class="pl-k">as</span> <span class="pl-k">*const</span> <span class="pl-k">u64</span>);
-    <span class="pl-c">// Directly followed by those arguments, bump pointer by 8 bytes</span>
-    <span class="pl-k">let</span> argv <span class="pl-k">=</span> stack_ptr.<span class="pl-en">add</span>(<span class="pl-c1">8</span>) <span class="pl-k">as</span> <span class="pl-k">*const</span> <span class="pl-k">*const</span> <span class="pl-k">u8</span>;
-    <span class="pl-k">let</span> ptr_size <span class="pl-k">=</span> core<span class="pl-k">::</span>mem<span class="pl-k">::</span><span class="pl-en">size_of</span><span class="pl-k">::</span>&#x3C;<span class="pl-k">usize</span>>();
-    <span class="pl-c">// Directly followed by a pointer to the environment variables, it's just a null terminated string.</span>
-    <span class="pl-c">// This isn't specified in Posix and is not great for portability, but this isn't meant to be portable outside of Linux.</span>
-    <span class="pl-k">let</span> env_offset <span class="pl-k">=</span> <span class="pl-c1">8</span> <span class="pl-k">+</span> argc <span class="pl-k">as</span> <span class="pl-k">usize</span> <span class="pl-k">*</span> ptr_size <span class="pl-k">+</span> ptr_size;
-    <span class="pl-c">// Bump pointer by combined offset</span>
-    <span class="pl-k">let</span> envp <span class="pl-k">=</span> stack_ptr.<span class="pl-en">add</span>(env_offset) <span class="pl-k">as</span> <span class="pl-k">*const</span> <span class="pl-k">*const</span> <span class="pl-k">u8</span>;
-    <span class="pl-k">let</span> <span class="pl-k">mut</span> null_offset <span class="pl-k">=</span> <span class="pl-c1">0</span>;
+#[cfg(all(feature <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>symbols<span class="pl-pds">"</span></span>, feature <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>start<span class="pl-pds">"</span></span>))]
+<span class="pl-k">unsafe</span> <span class="pl-k">extern</span> <span class="pl-s"><span class="pl-pds">"</span>C<span class="pl-pds">"</span></span> <span class="pl-k">fn</span> <span class="pl-en">__proxy_main</span>(<span class="pl-smi">stack_ptr</span><span class="pl-k">:</span> <span class="pl-k">*const</span> <span class="pl-en">u8</span>, <span class="pl-smi">dynv</span><span class="pl-k">:</span> <span class="pl-k">*const</span> <span class="pl-en">usize</span>) {
+<span class="pl-c">    // Fist 8 bytes is a u64 with the number of arguments</span>
+    <span class="pl-k">let</span> <span class="pl-smi">argc</span> <span class="pl-k">=</span> <span class="pl-k">*</span>(<span class="pl-smi">stack_ptr</span> <span class="pl-k">as</span> <span class="pl-k">*const</span> <span class="pl-en">u64</span>);
+<span class="pl-c">    // Directly followed by those arguments, bump pointer by 8 bytes</span>
+    <span class="pl-k">let</span> <span class="pl-smi">argv</span> <span class="pl-k">=</span> <span class="pl-smi">stack_ptr</span><span class="pl-k">.</span><span class="pl-en">add</span>(<span class="pl-c1">8</span>) <span class="pl-k">as</span> <span class="pl-k">*const</span> <span class="pl-k">*const</span> <span class="pl-en">u8</span>;
+    <span class="pl-k">let</span> <span class="pl-smi">ptr_size</span> <span class="pl-k">=</span> <span class="pl-en">core</span><span class="pl-k">::</span><span class="pl-en">mem</span><span class="pl-k">::</span><span class="pl-en">size_of</span><span class="pl-k">::</span>&#x3C;<span class="pl-en">usize</span>>();
+<span class="pl-c">    // Directly followed by a pointer to the environment variables, it's just a null terminated string.</span>
+<span class="pl-c">    // This isn't specified in Posix and is not great for portability, but this isn't meant to be portable outside of Linux.</span>
+    <span class="pl-k">let</span> <span class="pl-smi">env_offset</span> <span class="pl-k">=</span> <span class="pl-c1">8</span> <span class="pl-k">+</span> <span class="pl-smi">argc</span> <span class="pl-k">as</span> <span class="pl-en">usize</span> <span class="pl-k">*</span> <span class="pl-smi">ptr_size</span> <span class="pl-k">+</span> <span class="pl-smi">ptr_size</span>;
+<span class="pl-c">    // Bump pointer by combined offset</span>
+    <span class="pl-k">let</span> <span class="pl-smi">envp</span> <span class="pl-k">=</span> <span class="pl-smi">stack_ptr</span><span class="pl-k">.</span><span class="pl-en">add</span>(<span class="pl-smi">env_offset</span>) <span class="pl-k">as</span> <span class="pl-k">*const</span> <span class="pl-k">*const</span> <span class="pl-en">u8</span>;
+    <span class="pl-k">let</span> <span class="pl-k">mut</span> <span class="pl-smi">null_offset</span> <span class="pl-k">=</span> <span class="pl-c1">0</span>;
     <span class="pl-k">loop</span> {
-        <span class="pl-k">let</span> val <span class="pl-k">=</span> <span class="pl-k">*</span>(envp.<span class="pl-en">add</span>(null_offset));
-        <span class="pl-k">if</span> val <span class="pl-k">as</span> <span class="pl-k">usize</span> <span class="pl-k">==</span> <span class="pl-c1">0</span> {
+        <span class="pl-k">let</span> <span class="pl-smi">val</span> <span class="pl-k">=</span> <span class="pl-k">*</span>(<span class="pl-smi">envp</span><span class="pl-k">.</span><span class="pl-en">add</span>(<span class="pl-smi">null_offset</span>));
+        <span class="pl-k">if</span> <span class="pl-smi">val</span> <span class="pl-k">as</span> <span class="pl-en">usize</span> <span class="pl-k">==</span> <span class="pl-c1">0</span> {
             <span class="pl-k">break</span>;
         }
-        null_offset <span class="pl-k">+=</span> <span class="pl-c1">1</span>;
+        <span class="pl-smi">null_offset</span> <span class="pl-k">+=</span> <span class="pl-c1">1</span>;
     }
-    <span class="pl-c">// We now know how long the envp is</span>
-    <span class="pl-c">// ... </span>
+<span class="pl-c">    // We now know how long the envp is</span>
+<span class="pl-c">    // ... </span>
 }
 </pre></div>
 <p>This works all the same as a <code>pie</code> because:</p>
@@ -1072,12 +1212,12 @@ no addresses are needed for those. This is because of inlining.</p>
 <p>Looking at <code>core::mem::size_of&#x3C;T>()</code>:</p>
 <div class="highlight highlight-rust"><pre>#[inline(always)]
 #[must_use]
-#[stable(feature = <span class="pl-s">"rust1"</span>, since = <span class="pl-s">"1.0.0"</span>)]
+#[stable(feature <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>rust1<span class="pl-pds">"</span></span>, since <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>1.0.0<span class="pl-pds">"</span></span>)]
 #[rustc_promotable]
-#[rustc_const_stable(feature = <span class="pl-s">"const_mem_size_of"</span>, since = <span class="pl-s">"1.24.0"</span>)]
-#[cfg_attr(not(test), rustc_diagnostic_item = <span class="pl-s">"mem_size_of"</span>)]
-<span class="pl-k">pub</span> <span class="pl-k">const</span> <span class="pl-k">fn</span> <span class="pl-en">size_of</span>&#x3C;T>() -> <span class="pl-k">usize</span> {
-    intrinsics<span class="pl-k">::</span><span class="pl-en">size_of</span><span class="pl-k">::</span>&#x3C;T>()
+#[rustc_const_stable(feature <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>const_mem_size_of<span class="pl-pds">"</span></span>, since <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>1.24.0<span class="pl-pds">"</span></span>)]
+#[cfg_attr(not(test), rustc_diagnostic_item <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>mem_size_of<span class="pl-pds">"</span></span>)]
+<span class="pl-k">pub</span> <span class="pl-k">const</span> <span class="pl-k">fn</span> <span class="pl-en">size_of</span>&#x3C;<span class="pl-en">T</span>>() <span class="pl-k">-></span> <span class="pl-en">usize</span> {
+    <span class="pl-en">intrinsics</span><span class="pl-k">::</span><span class="pl-en">size_of</span><span class="pl-k">::</span>&#x3C;<span class="pl-en">T</span>>()
 }
 </pre></div>
 <p>It has the <code>#[inline(always)]</code> attribute, the same goes for <code>ptr::add()</code>. Since that code is inlined,
@@ -1086,32 +1226,32 @@ an address to a function isn't necessary, and therefore it works even though all
 to <code>tiny-std</code> executables yet. But, printing to the terminal requires code, code that usually isn't <code>#[inline(always)]</code>.</p>
 <p>So I wrote a small print:</p>
 <div class="highlight highlight-rust"><pre>#[inline(always)]
-<span class="pl-k">unsafe</span> <span class="pl-k">fn</span> <span class="pl-en">print_labeled</span>(msg: <span class="pl-k">&#x26;</span>[<span class="pl-k">u8</span>], val: <span class="pl-k">usize</span>) {
-    <span class="pl-en">print_label</span>(msg);
-    <span class="pl-en">print_val</span>(val);
+<span class="pl-k">unsafe</span> <span class="pl-k">fn</span> <span class="pl-en">print_labeled</span>(<span class="pl-smi">msg</span><span class="pl-k">:</span> <span class="pl-k">&#x26;</span>[<span class="pl-en">u8</span>], <span class="pl-smi">val</span><span class="pl-k">:</span> <span class="pl-en">usize</span>) {
+    <span class="pl-en">print_label</span>(<span class="pl-smi">msg</span>);
+    <span class="pl-en">print_val</span>(<span class="pl-smi">val</span>);
 }
 #[inline(always)]
-<span class="pl-k">unsafe</span> <span class="pl-k">fn</span> <span class="pl-en">print_label</span>(msg: <span class="pl-k">&#x26;</span>[<span class="pl-k">u8</span>]) {
-    <span class="pl-en">syscall!</span>(WRITE, <span class="pl-c1">1</span>, msg.<span class="pl-en">as_ptr</span>(), msg.<span class="pl-en">len</span>());
+<span class="pl-k">unsafe</span> <span class="pl-k">fn</span> <span class="pl-en">print_label</span>(<span class="pl-smi">msg</span><span class="pl-k">:</span> <span class="pl-k">&#x26;</span>[<span class="pl-en">u8</span>]) {
+    <span class="pl-en">syscall!</span>(<span class="pl-c1">WRITE</span>, <span class="pl-c1">1</span>, <span class="pl-smi">msg</span><span class="pl-k">.</span><span class="pl-en">as_ptr</span>(), <span class="pl-smi">msg</span><span class="pl-k">.</span><span class="pl-en">len</span>());
 }
 #[inline(always)]
-<span class="pl-k">unsafe</span> <span class="pl-k">fn</span> <span class="pl-en">print_val</span>(u: <span class="pl-k">usize</span>) {
-    <span class="pl-en">syscall!</span>(WRITE, <span class="pl-c1">1</span>, <span class="pl-en">num_to_digits</span>(u).<span class="pl-en">as_ptr</span>(), <span class="pl-c1">21</span>);
+<span class="pl-k">unsafe</span> <span class="pl-k">fn</span> <span class="pl-en">print_val</span>(<span class="pl-smi">u</span><span class="pl-k">:</span> <span class="pl-en">usize</span>) {
+    <span class="pl-en">syscall!</span>(<span class="pl-c1">WRITE</span>, <span class="pl-c1">1</span>, <span class="pl-en">num_to_digits</span>(<span class="pl-smi">u</span>)<span class="pl-k">.</span><span class="pl-en">as_ptr</span>(), <span class="pl-c1">21</span>);
 }
 #[inline(always)]
-<span class="pl-k">unsafe</span> <span class="pl-k">fn</span> <span class="pl-en">num_to_digits</span>(<span class="pl-k">mut</span> u: <span class="pl-k">usize</span>) -> [<span class="pl-k">u8</span>; <span class="pl-c1">22</span>] {
-    <span class="pl-k">let</span> <span class="pl-k">mut</span> base <span class="pl-k">=</span> <span class="pl-k">*</span><span class="pl-s">b"<span class="pl-cce">\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\n</span>"</span>;
-    <span class="pl-k">let</span> <span class="pl-k">mut</span> ind <span class="pl-k">=</span> base.<span class="pl-en">len</span>() <span class="pl-k">-</span> <span class="pl-c1">2</span>;
-    <span class="pl-k">if</span> u <span class="pl-k">==</span> <span class="pl-c1">0</span> {
-        base[ind] <span class="pl-k">=</span> <span class="pl-c1">48</span>;
+<span class="pl-k">unsafe</span> <span class="pl-k">fn</span> <span class="pl-en">num_to_digits</span>(<span class="pl-k">mut</span> <span class="pl-smi">u</span><span class="pl-k">:</span> <span class="pl-en">usize</span>) <span class="pl-k">-></span> [<span class="pl-en">u8</span>; <span class="pl-c1">22</span>] {
+    <span class="pl-k">let</span> <span class="pl-k">mut</span> <span class="pl-smi">base</span> <span class="pl-k">=</span> <span class="pl-k">*</span><span class="pl-s">b<span class="pl-pds">"</span><span class="pl-cce">\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\n</span><span class="pl-pds">"</span></span>;
+    <span class="pl-k">let</span> <span class="pl-k">mut</span> <span class="pl-smi">ind</span> <span class="pl-k">=</span> <span class="pl-smi">base</span><span class="pl-k">.</span><span class="pl-en">len</span>() <span class="pl-k">-</span> <span class="pl-c1">2</span>;
+    <span class="pl-k">if</span> <span class="pl-smi">u</span> <span class="pl-k">==</span> <span class="pl-c1">0</span> {
+        <span class="pl-smi">base</span>[<span class="pl-smi">ind</span>] <span class="pl-k">=</span> <span class="pl-c1">48</span>;
     }
-    <span class="pl-k">while</span> u <span class="pl-k">></span> <span class="pl-c1">0</span> {
-        <span class="pl-k">let</span> md <span class="pl-k">=</span> u <span class="pl-k">%</span> <span class="pl-c1">10</span>;
-        base[ind] <span class="pl-k">=</span> md <span class="pl-k">as</span> <span class="pl-k">u8</span> <span class="pl-k">+</span> <span class="pl-c1">48</span>;
-        ind <span class="pl-k">-=</span> <span class="pl-c1">1</span>;
-        u <span class="pl-k">=</span> u <span class="pl-k">/</span> <span class="pl-c1">10</span>;
+    <span class="pl-k">while</span> <span class="pl-smi">u</span> <span class="pl-k">></span> <span class="pl-c1">0</span> {
+        <span class="pl-k">let</span> <span class="pl-smi">md</span> <span class="pl-k">=</span> <span class="pl-smi">u</span> <span class="pl-k">%</span> <span class="pl-c1">10</span>;
+        <span class="pl-smi">base</span>[<span class="pl-smi">ind</span>] <span class="pl-k">=</span> <span class="pl-smi">md</span> <span class="pl-k">as</span> <span class="pl-en">u8</span> <span class="pl-k">+</span> <span class="pl-c1">48</span>;
+        <span class="pl-smi">ind</span> <span class="pl-k">-=</span> <span class="pl-c1">1</span>;
+        <span class="pl-smi">u</span> <span class="pl-k">=</span> <span class="pl-smi">u</span> <span class="pl-k">/</span> <span class="pl-c1">10</span>;
     }
-    base
+    <span class="pl-smi">base</span>
 }
 </pre></div>
 <p>Printing to the terminal can be done through the syscall <code>WRITE</code> on <code>fd</code> <code>1</code> (<code>STDOUT</code>).<br>
@@ -1122,7 +1262,7 @@ Since the max digits of a <code>usize</code> on a 64-bit machine is 21, I alloca
 trailing zeroes.</p>
 <p>Invoking it looks like this:</p>
 <div class="highlight highlight-rust"><pre><span class="pl-k">fn</span> <span class="pl-en">test</span>() {
-    <span class="pl-en">print_labeled</span>(<span class="pl-s">b"My msg as bytes: "</span>, <span class="pl-c1">15</span>);
+    <span class="pl-en">print_labeled</span>(<span class="pl-s">b<span class="pl-pds">"</span>My msg as bytes: <span class="pl-pds">"</span></span>, <span class="pl-c1">15</span>);
 }
 </pre></div>
 <h2>Relocation</h2>
@@ -1145,7 +1285,7 @@ remapping).</p>
 </pre></div>
 <p>So I replicated the aux-vec on the stack like this:</p>
 <div class="highlight highlight-rust"><pre><span class="pl-c">// There are 32 aux values.</span>
-<span class="pl-k">let</span> <span class="pl-k">mut</span> aux: [<span class="pl-c1">0usize</span>; <span class="pl-c1">32</span>];
+<span class="pl-k">let</span> <span class="pl-k">mut</span> <span class="pl-smi">aux</span><span class="pl-k">:</span> [<span class="pl-c1">0</span><span class="pl-en">usize</span>; <span class="pl-c1">32</span>];
 </pre></div>
 <p>And then initialize it, with the <code>aux</code>-pointer provided by the OS.</p>
 <p>The OS-supplies some values in the <code>aux</code>-vector <a href="https://man7.org/linux/man-pages/man3/getauxval.3.html">more info here</a>
@@ -1158,21 +1298,21 @@ the necessary ones for remapping are:</p>
 </ol>
 <p>First a virtual address found at the program header that has the <code>dynamic</code> type must be found.</p>
 <p>The program header is laid out in memory as this struct:</p>
-<div class="highlight highlight-rust"><pre>#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-<span class="pl-k">pub</span> <span class="pl-k">struct</span> <span class="pl-en">elf64_phdr</span> {
-    <span class="pl-k">pub</span> p_type: Elf64_Word,
-    <span class="pl-k">pub</span> p_flags: Elf64_Word,
-    <span class="pl-k">pub</span> p_offset: Elf64_Off,
-    <span class="pl-k">pub</span> p_vaddr: Elf64_Addr,
-    <span class="pl-k">pub</span> p_paddr: Elf64_Addr,
-    <span class="pl-k">pub</span> p_filesz: Elf64_Xword,
-    <span class="pl-k">pub</span> p_memsz: Elf64_Xword,
-    <span class="pl-k">pub</span> p_align: Elf64_Xword,
+<div class="highlight highlight-rust"><pre>#[repr(<span class="pl-en">C</span>)]
+#[derive(<span class="pl-en">Debug</span>, <span class="pl-en">Copy</span>, <span class="pl-en">Clone</span>)]
+<span class="pl-k">pub</span> <span class="pl-k">struct</span> <span class="pl-smi">elf64_phdr</span> {
+    <span class="pl-k">pub</span> <span class="pl-smi">p_type</span><span class="pl-k">:</span> Elf64_Word,
+    <span class="pl-k">pub</span> <span class="pl-smi">p_flags</span><span class="pl-k">:</span> Elf64_Word,
+    <span class="pl-k">pub</span> <span class="pl-smi">p_offset</span><span class="pl-k">:</span> Elf64_Off,
+    <span class="pl-k">pub</span> <span class="pl-smi">p_vaddr</span><span class="pl-k">:</span> Elf64_Addr,
+    <span class="pl-k">pub</span> <span class="pl-smi">p_paddr</span><span class="pl-k">:</span> Elf64_Addr,
+    <span class="pl-k">pub</span> <span class="pl-smi">p_filesz</span><span class="pl-k">:</span> Elf64_Xword,
+    <span class="pl-k">pub</span> <span class="pl-smi">p_memsz</span><span class="pl-k">:</span> Elf64_Xword,
+    <span class="pl-k">pub</span> <span class="pl-smi">p_align</span><span class="pl-k">:</span> Elf64_Xword,
 }
 </pre></div>
 <p>The address of the <code>AT_PHDR</code> can be treated as an array declared as:</p>
-<div class="highlight highlight-rust"><pre><span class="pl-k">let</span> phdr: <span class="pl-k">&#x26;</span>[elf64_phdr; AT_PHNUM] <span class="pl-k">=</span> ...
+<div class="highlight highlight-rust"><pre><span class="pl-k">let</span> <span class="pl-smi">phdr</span><span class="pl-k">:</span> <span class="pl-k">&#x26;</span>[<span class="pl-smi">elf64_phdr</span>; <span class="pl-c1">AT_PHNUM</span>] <span class="pl-k">=</span> <span class="pl-k">...</span>
 </pre></div>
 <p>That array can be walked until finding a program header struct with <code>p_type</code> = <code>PT_DYNAMIC</code>,
 that program header holds an offset at <code>p_vaddr</code> that can be subtracted from the <code>dynv</code> pointer to get
@@ -1180,7 +1320,7 @@ the correct <code>base</code> address.</p>
 <h2>Initialize the dyn section</h2>
 <p>The <code>dynv</code> pointer supplied by the os, as previously stated, is analogous to the <code>aux</code>-pointer but
 trying to stack allocate its value mappings like this:</p>
-<div class="highlight highlight-rust"><pre><span class="pl-k">let</span> dyn_values <span class="pl-k">=</span> [<span class="pl-c1">0usize</span>; <span class="pl-c1">37</span>];
+<div class="highlight highlight-rust"><pre><span class="pl-k">let</span> <span class="pl-smi">dyn_values</span> <span class="pl-k">=</span> [<span class="pl-c1">0</span><span class="pl-en">usize</span>; <span class="pl-c1">37</span>];
 </pre></div>
 <p>Will cause a segfault.</p>
 <h3>SYMBOLS!!!</h3>
@@ -1208,60 +1348,60 @@ The unpacked aux values now look like this:</p>
 <span class="pl-c">/// will emit memset on a zeroed allocation of over 256 bytes, which we won't be able</span>
 <span class="pl-c">/// to find and thus will result in an immediate segfault on start.</span>
 <span class="pl-c">/// See [docs](https://man7.org/linux/man-pages/man3/getauxval.3.html)</span>
-#[derive(Debug)]
+#[derive(<span class="pl-en">Debug</span>)]
 <span class="pl-k">pub</span>(<span class="pl-k">crate</span>) <span class="pl-k">struct</span> <span class="pl-en">AuxValues</span> {
-    <span class="pl-c">/// Base address of the program interpreter</span>
-    <span class="pl-k">pub</span>(<span class="pl-k">crate</span>) at_base: <span class="pl-k">usize</span>,
-    <span class="pl-c">/// Real group id of the main thread</span>
-    <span class="pl-k">pub</span>(<span class="pl-k">crate</span>) at_gid: <span class="pl-k">usize</span>,
-    <span class="pl-c">/// Real user id of the main thread</span>
-    <span class="pl-k">pub</span>(<span class="pl-k">crate</span>) at_uid: <span class="pl-k">usize</span>,
-    <span class="pl-c">/// Address of the executable's program headers</span>
-    <span class="pl-k">pub</span>(<span class="pl-k">crate</span>) at_phdr: <span class="pl-k">usize</span>,
-    <span class="pl-c">/// Size of program header entry</span>
-    <span class="pl-k">pub</span>(<span class="pl-k">crate</span>) at_phent: <span class="pl-k">usize</span>,
-    <span class="pl-c">/// Number of program headers</span>
-    <span class="pl-k">pub</span>(<span class="pl-k">crate</span>) at_phnum: <span class="pl-k">usize</span>,
-    <span class="pl-c">/// Address pointing to 16 bytes of a random value</span>
-    <span class="pl-k">pub</span>(<span class="pl-k">crate</span>) at_random: <span class="pl-k">usize</span>,
-    <span class="pl-c">/// Executable should be treated securely</span>
-    <span class="pl-k">pub</span>(<span class="pl-k">crate</span>) at_secure: <span class="pl-k">usize</span>,
-    <span class="pl-c">/// Address of the vdso</span>
-    <span class="pl-k">pub</span>(<span class="pl-k">crate</span>) at_sysinfo_ehdr: <span class="pl-k">usize</span>,
+<span class="pl-c">    /// Base address of the program interpreter</span>
+    <span class="pl-k">pub</span>(<span class="pl-k">crate</span>) <span class="pl-smi">at_base</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
+<span class="pl-c">    /// Real group id of the main thread</span>
+    <span class="pl-k">pub</span>(<span class="pl-k">crate</span>) <span class="pl-smi">at_gid</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
+<span class="pl-c">    /// Real user id of the main thread</span>
+    <span class="pl-k">pub</span>(<span class="pl-k">crate</span>) <span class="pl-smi">at_uid</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
+<span class="pl-c">    /// Address of the executable's program headers</span>
+    <span class="pl-k">pub</span>(<span class="pl-k">crate</span>) <span class="pl-smi">at_phdr</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
+<span class="pl-c">    /// Size of program header entry</span>
+    <span class="pl-k">pub</span>(<span class="pl-k">crate</span>) <span class="pl-smi">at_phent</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
+<span class="pl-c">    /// Number of program headers</span>
+    <span class="pl-k">pub</span>(<span class="pl-k">crate</span>) <span class="pl-smi">at_phnum</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
+<span class="pl-c">    /// Address pointing to 16 bytes of a random value</span>
+    <span class="pl-k">pub</span>(<span class="pl-k">crate</span>) <span class="pl-smi">at_random</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
+<span class="pl-c">    /// Executable should be treated securely</span>
+    <span class="pl-k">pub</span>(<span class="pl-k">crate</span>) <span class="pl-smi">at_secure</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
+<span class="pl-c">    /// Address of the vdso</span>
+    <span class="pl-k">pub</span>(<span class="pl-k">crate</span>) <span class="pl-smi">at_sysinfo_ehdr</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
 }
 </pre></div>
 <p>It only contains the aux-values that are actually used by <code>tiny-std</code>.</p>
 <p>The dyn-values are only used for relocations so far, so they were packed into this much smaller struct:</p>
 <div class="highlight highlight-rust"><pre><span class="pl-k">pub</span>(<span class="pl-k">crate</span>) <span class="pl-k">struct</span> <span class="pl-en">DynSection</span> {
-    rel: <span class="pl-k">usize</span>,
-    rel_sz: <span class="pl-k">usize</span>,
-    rela: <span class="pl-k">usize</span>,
-    rela_sz: <span class="pl-k">usize</span>,
+    <span class="pl-smi">rel</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
+    <span class="pl-smi">rel_sz</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
+    <span class="pl-smi">rela</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
+    <span class="pl-smi">rela_sz</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
 }
 </pre></div>
 <p>Now that <code>rustc</code>'s memset emissions has been sidestepped, the <code>DynSection</code> struct can be filled with the values from the
 <code>dynv</code>-pointer, and then finally the symbols can be relocated:</p>
 <div class="highlight highlight-rust"><pre>#[inline(always)]
-<span class="pl-k">pub</span>(<span class="pl-k">crate</span>) <span class="pl-k">unsafe</span> <span class="pl-k">fn</span> <span class="pl-en">relocate</span>(<span class="pl-k">&#x26;</span><span class="pl-c1">self</span>, base_addr: <span class="pl-k">usize</span>) {
-    <span class="pl-c">// Relocate all rel-entries</span>
-    <span class="pl-k">for</span> i <span class="pl-k">in</span> <span class="pl-c1">0</span>..(<span class="pl-c1">self</span>.rel_sz <span class="pl-k">/</span> core<span class="pl-k">::</span>mem<span class="pl-k">::</span><span class="pl-en">size_of</span><span class="pl-k">::</span>&#x3C;Elf64Rel>()) {
-        <span class="pl-k">let</span> rel_ptr <span class="pl-k">=</span> ((base_addr <span class="pl-k">+</span> <span class="pl-c1">self</span>.rel) <span class="pl-k">as</span> <span class="pl-k">*const</span> Elf64Rel).<span class="pl-en">add</span>(i);
-        <span class="pl-k">let</span> rel <span class="pl-k">=</span> <span class="pl-en">ptr_unsafe_ref</span>(rel_ptr);
-        <span class="pl-k">if</span> rel.<span class="pl-c1">0</span>.r_info <span class="pl-k">==</span> <span class="pl-en">relative_type</span>(REL_RELATIVE) {
-            <span class="pl-k">let</span> rel_addr <span class="pl-k">=</span> (base_addr <span class="pl-k">+</span> rel.<span class="pl-c1">0</span>.r_offset <span class="pl-k">as</span> <span class="pl-k">usize</span>) <span class="pl-k">as</span> <span class="pl-k">*mut</span> <span class="pl-k">usize</span>;
-            <span class="pl-k">*</span>rel_addr <span class="pl-k">+=</span> base_addr;
+<span class="pl-k">pub</span>(<span class="pl-k">crate</span>) <span class="pl-k">unsafe</span> <span class="pl-k">fn</span> <span class="pl-en">relocate</span>(<span class="pl-k">&#x26;</span><span class="pl-c1">self</span>, <span class="pl-smi">base_addr</span><span class="pl-k">:</span> <span class="pl-en">usize</span>) {
+<span class="pl-c">    // Relocate all rel-entries</span>
+    <span class="pl-k">for</span> <span class="pl-smi">i</span> <span class="pl-k">in</span> <span class="pl-c1">0</span><span class="pl-k">..</span>(<span class="pl-c1">self</span><span class="pl-k">.</span>rel_sz <span class="pl-k">/</span> <span class="pl-en">core</span><span class="pl-k">::</span><span class="pl-en">mem</span><span class="pl-k">::</span><span class="pl-en">size_of</span><span class="pl-k">::</span>&#x3C;<span class="pl-en">Elf64Rel</span>>()) {
+        <span class="pl-k">let</span> <span class="pl-smi">rel_ptr</span> <span class="pl-k">=</span> ((<span class="pl-smi">base_addr</span> <span class="pl-k">+</span> <span class="pl-c1">self</span><span class="pl-k">.</span>rel) <span class="pl-k">as</span> <span class="pl-k">*const</span> <span class="pl-c1">Elf64Rel</span>)<span class="pl-k">.</span><span class="pl-en">add</span>(<span class="pl-smi">i</span>);
+        <span class="pl-k">let</span> <span class="pl-smi">rel</span> <span class="pl-k">=</span> <span class="pl-en">ptr_unsafe_ref</span>(<span class="pl-smi">rel_ptr</span>);
+        <span class="pl-k">if</span> <span class="pl-smi">rel</span><span class="pl-k">.</span><span class="pl-c1">0.</span>r_info <span class="pl-k">==</span> <span class="pl-en">relative_type</span>(<span class="pl-c1">REL_RELATIVE</span>) {
+            <span class="pl-k">let</span> <span class="pl-smi">rel_addr</span> <span class="pl-k">=</span> (<span class="pl-smi">base_addr</span> <span class="pl-k">+</span> <span class="pl-smi">rel</span><span class="pl-k">.</span><span class="pl-c1">0.</span>r_offset <span class="pl-k">as</span> <span class="pl-en">usize</span>) <span class="pl-k">as</span> <span class="pl-k">*mut</span> <span class="pl-en">usize</span>;
+            <span class="pl-k">*</span><span class="pl-smi">rel_addr</span> <span class="pl-k">+=</span> <span class="pl-smi">base_addr</span>;
         }
     }
-    <span class="pl-c">// Relocate all rela-entries</span>
-    <span class="pl-k">for</span> i <span class="pl-k">in</span> <span class="pl-c1">0</span>..(<span class="pl-c1">self</span>.rela_sz <span class="pl-k">/</span> core<span class="pl-k">::</span>mem<span class="pl-k">::</span><span class="pl-en">size_of</span><span class="pl-k">::</span>&#x3C;Elf64Rela>()) {
-        <span class="pl-k">let</span> rela_ptr <span class="pl-k">=</span> ((base_addr <span class="pl-k">+</span> <span class="pl-c1">self</span>.rela) <span class="pl-k">as</span> <span class="pl-k">*const</span> Elf64Rela).<span class="pl-en">add</span>(i);
-        <span class="pl-k">let</span> rela <span class="pl-k">=</span> <span class="pl-en">ptr_unsafe_ref</span>(rela_ptr);
-        <span class="pl-k">if</span> rela.<span class="pl-c1">0</span>.r_info <span class="pl-k">==</span> <span class="pl-en">relative_type</span>(REL_RELATIVE) {
-            <span class="pl-k">let</span> rel_addr <span class="pl-k">=</span> (base_addr <span class="pl-k">+</span> rela.<span class="pl-c1">0</span>.r_offset <span class="pl-k">as</span> <span class="pl-k">usize</span>) <span class="pl-k">as</span> <span class="pl-k">*mut</span> <span class="pl-k">usize</span>;
-            <span class="pl-k">*</span>rel_addr <span class="pl-k">=</span> base_addr <span class="pl-k">+</span> rela.<span class="pl-c1">0</span>.r_addend <span class="pl-k">as</span> <span class="pl-k">usize</span>;
+<span class="pl-c">    // Relocate all rela-entries</span>
+    <span class="pl-k">for</span> <span class="pl-smi">i</span> <span class="pl-k">in</span> <span class="pl-c1">0</span><span class="pl-k">..</span>(<span class="pl-c1">self</span><span class="pl-k">.</span>rela_sz <span class="pl-k">/</span> <span class="pl-en">core</span><span class="pl-k">::</span><span class="pl-en">mem</span><span class="pl-k">::</span><span class="pl-en">size_of</span><span class="pl-k">::</span>&#x3C;<span class="pl-en">Elf64Rela</span>>()) {
+        <span class="pl-k">let</span> <span class="pl-smi">rela_ptr</span> <span class="pl-k">=</span> ((<span class="pl-smi">base_addr</span> <span class="pl-k">+</span> <span class="pl-c1">self</span><span class="pl-k">.</span>rela) <span class="pl-k">as</span> <span class="pl-k">*const</span> <span class="pl-c1">Elf64Rela</span>)<span class="pl-k">.</span><span class="pl-en">add</span>(<span class="pl-smi">i</span>);
+        <span class="pl-k">let</span> <span class="pl-smi">rela</span> <span class="pl-k">=</span> <span class="pl-en">ptr_unsafe_ref</span>(<span class="pl-smi">rela_ptr</span>);
+        <span class="pl-k">if</span> <span class="pl-smi">rela</span><span class="pl-k">.</span><span class="pl-c1">0.</span>r_info <span class="pl-k">==</span> <span class="pl-en">relative_type</span>(<span class="pl-c1">REL_RELATIVE</span>) {
+            <span class="pl-k">let</span> <span class="pl-smi">rel_addr</span> <span class="pl-k">=</span> (<span class="pl-smi">base_addr</span> <span class="pl-k">+</span> <span class="pl-smi">rela</span><span class="pl-k">.</span><span class="pl-c1">0.</span>r_offset <span class="pl-k">as</span> <span class="pl-en">usize</span>) <span class="pl-k">as</span> <span class="pl-k">*mut</span> <span class="pl-en">usize</span>;
+            <span class="pl-k">*</span><span class="pl-smi">rel_addr</span> <span class="pl-k">=</span> <span class="pl-smi">base_addr</span> <span class="pl-k">+</span> <span class="pl-smi">rela</span><span class="pl-k">.</span><span class="pl-c1">0.</span>r_addend <span class="pl-k">as</span> <span class="pl-en">usize</span>;
         }
     }
-    <span class="pl-c">// Skip implementing relr-entries for now</span>
+<span class="pl-c">    // Skip implementing relr-entries for now</span>
 }
 </pre></div>
 <p>After the <code>relocate</code>-section runs, <code>symbols</code> can again be used, and <code>tiny-std</code> can continue with the setup.</p>
@@ -1272,7 +1412,7 @@ The unpacked aux values now look like this:</p>
 const TEST_HTML = String.raw`<div class="markdown-body"><h1>Here's a test write-up</h1>
 <p>I always test in prod.</p>
 <div class="highlight highlight-rust"><pre><span class="pl-k">fn</span> <span class="pl-en">main</span>() {
-    <span class="pl-c1">panic!</span>(<span class="pl-s">"Finally highlighting works"</span>);
+    <span class="pl-en">panic!</span>(<span class="pl-s"><span class="pl-pds">"</span>Finally highlighting works<span class="pl-pds">"</span></span>);
 }
 </pre></div>
 <p>Test some change here!</p>
@@ -1307,12 +1447,12 @@ only go into <code>Linux</code> specifically here, and only from an api-consumer
 <h3>Spawning a thread with a minimal task</h3>
 <p>In the rust std-library, a thread can be spawned with</p>
 <div class="highlight highlight-rust"><pre><span class="pl-k">fn</span> <span class="pl-en">main</span>() {
-    <span class="pl-k">let</span> handle <span class="pl-k">=</span> std<span class="pl-k">::</span>thread<span class="pl-k">::</span><span class="pl-en">spawn</span>(<span class="pl-k">||</span> {
-        std<span class="pl-k">::</span>thread<span class="pl-k">::</span><span class="pl-en">sleep</span>(std<span class="pl-k">::</span>time<span class="pl-k">::</span>Duration<span class="pl-k">::</span><span class="pl-en">from_millis</span>(<span class="pl-c1">500</span>));
-        <span class="pl-c1">println!</span>(<span class="pl-s">"Hello from my thread"</span>);
+    <span class="pl-k">let</span> <span class="pl-smi">handle</span> <span class="pl-k">=</span> <span class="pl-en">std</span><span class="pl-k">::</span><span class="pl-en">thread</span><span class="pl-k">::</span><span class="pl-en">spawn</span>(<span class="pl-k">||</span> {
+        <span class="pl-en">std</span><span class="pl-k">::</span><span class="pl-en">thread</span><span class="pl-k">::</span><span class="pl-en">sleep</span>(<span class="pl-en">std</span><span class="pl-k">::</span><span class="pl-en">time</span><span class="pl-k">::</span><span class="pl-en">Duration</span><span class="pl-k">::</span><span class="pl-en">from_millis</span>(<span class="pl-c1">500</span>));
+        <span class="pl-en">println!</span>(<span class="pl-s"><span class="pl-pds">"</span>Hello from my thread<span class="pl-pds">"</span></span>);
     });
-    <span class="pl-c">// Suspends execution of the calling thread until the child-thread completes.  </span>
-    handle.<span class="pl-en">join</span>().<span class="pl-en">unwrap</span>();   
+<span class="pl-c">    // Suspends execution of the calling thread until the child-thread completes.  </span>
+    <span class="pl-smi">handle</span><span class="pl-k">.</span><span class="pl-en">join</span>()<span class="pl-k">.</span><span class="pl-en">unwrap</span>();   
 }
 </pre></div>
 <p>In the above program, some setup runs before the main-function, some delegated to
@@ -1353,25 +1493,25 @@ Here's an equivalent <code>fork</code> using the <code>clone</code> syscall from
 <span class="pl-c">/// See above</span>
 <span class="pl-c">/// # Safety</span>
 <span class="pl-c">/// See above</span>
-#[cfg(target_arch = <span class="pl-s">"aarch64"</span>)]
-<span class="pl-k">pub</span> <span class="pl-k">unsafe</span> <span class="pl-k">fn</span> <span class="pl-en">fork</span>() -> <span class="pl-k">Result</span>&#x3C;PidT> {
-    <span class="pl-c">// SIGCHLD is mandatory on aarch64 if mimicking fork it seems</span>
-    <span class="pl-k">let</span> cflgs <span class="pl-k">=</span> <span class="pl-k">crate::</span>platform<span class="pl-k">::</span>SignalKind<span class="pl-k">::</span>SIGCHLD;
-    <span class="pl-k">let</span> res <span class="pl-k">=</span> <span class="pl-en">syscall!</span>(CLONE, cflgs.<span class="pl-en">bits</span>().<span class="pl-c1">0</span>, <span class="pl-c1">0</span>, <span class="pl-c1">0</span>, <span class="pl-c1">0</span>, <span class="pl-c1">0</span>);
-    <span class="pl-en">bail_on_below_zero!</span>(res, <span class="pl-s">"CLONE syscall failed"</span>);
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    <span class="pl-c1">Ok</span>(res <span class="pl-k">as</span> <span class="pl-k">i32</span>)
+#[cfg(target_arch <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>aarch64<span class="pl-pds">"</span></span>)]
+<span class="pl-k">pub</span> <span class="pl-k">unsafe</span> <span class="pl-k">fn</span> <span class="pl-en">fork</span>() <span class="pl-k">-></span> <span class="pl-en">Result</span>&#x3C;<span class="pl-en">PidT</span>> {
+<span class="pl-c">    // SIGCHLD is mandatory on aarch64 if mimicking fork it seems</span>
+    <span class="pl-k">let</span> <span class="pl-smi">cflgs</span> <span class="pl-k">=</span> <span class="pl-k">crate::</span><span class="pl-en">platform</span><span class="pl-k">::</span><span class="pl-en">SignalKind</span><span class="pl-k">::</span><span class="pl-c1">SIGCHLD</span>;
+    <span class="pl-k">let</span> <span class="pl-smi">res</span> <span class="pl-k">=</span> <span class="pl-en">syscall!</span>(<span class="pl-c1">CLONE</span>, <span class="pl-smi">cflgs</span><span class="pl-k">.</span><span class="pl-en">bits</span>()<span class="pl-k">.</span><span class="pl-c1">0</span>, <span class="pl-c1">0</span>, <span class="pl-c1">0</span>, <span class="pl-c1">0</span>, <span class="pl-c1">0</span>);
+    <span class="pl-en">bail_on_below_zero!</span>(<span class="pl-smi">res</span>, <span class="pl-s"><span class="pl-pds">"</span>CLONE syscall failed<span class="pl-pds">"</span></span>);
+    #[allow(clippy<span class="pl-k">::</span>cast_possible_truncation, clippy<span class="pl-k">::</span>cast_possible_wrap)]
+    <span class="pl-en">Ok</span>(<span class="pl-smi">res</span> <span class="pl-k">as</span> <span class="pl-en">i32</span>)
 }
 </pre></div>
 <p>What happens immediately after this call, is that our process is cloned and starts executing past the code which called
 <code>clone</code>, following the above <code>Rust</code> example:</p>
 <div class="highlight highlight-rust"><pre><span class="pl-k">fn</span> <span class="pl-en">parallelism_through_multiprocess</span>() {
-    <span class="pl-k">let</span> pid <span class="pl-k">=</span> <span class="pl-k">unsafe</span> { rusl<span class="pl-k">::</span>process<span class="pl-k">::</span><span class="pl-en">fork</span>().<span class="pl-en">unwrap</span>() };
-    <span class="pl-k">if</span> pid <span class="pl-k">==</span> <span class="pl-c1">0</span> {
-        <span class="pl-c1">println!</span>(<span class="pl-s">"In child!"</span>);
-        rusl<span class="pl-k">::</span>process<span class="pl-k">::</span><span class="pl-en">exit</span>(<span class="pl-c1">0</span>);
+    <span class="pl-k">let</span> <span class="pl-smi">pid</span> <span class="pl-k">=</span> <span class="pl-k">unsafe</span> { <span class="pl-en">rusl</span><span class="pl-k">::</span><span class="pl-en">process</span><span class="pl-k">::</span><span class="pl-en">fork</span>()<span class="pl-k">.</span><span class="pl-en">unwrap</span>() };
+    <span class="pl-k">if</span> <span class="pl-smi">pid</span> <span class="pl-k">==</span> <span class="pl-c1">0</span> {
+        <span class="pl-en">println!</span>(<span class="pl-s"><span class="pl-pds">"</span>In child!<span class="pl-pds">"</span></span>);
+        <span class="pl-en">rusl</span><span class="pl-k">::</span><span class="pl-en">process</span><span class="pl-k">::</span><span class="pl-en">exit</span>(<span class="pl-c1">0</span>);
     } <span class="pl-k">else</span> {
-        <span class="pl-c1">println!</span>(<span class="pl-s">"In parent, spawned child {pid}"</span>);
+        <span class="pl-en">println!</span>(<span class="pl-s"><span class="pl-pds">"</span>In parent, spawned child {pid}<span class="pl-pds">"</span></span>);
     }
 }
 </pre></div>
@@ -1391,14 +1531,14 @@ intensive, and communicating between processes can be slower than communicating 
 process, which got a full copy of the parent-process' memory with copy-on-write semantics.</p>
 <p>To reduce overhead in both spawning, and communicating between the cloned process and the rest of the processes
 in the application, a combination of flags are used:</p>
-<div class="highlight highlight-rust"><pre><span class="pl-k">let</span> flags <span class="pl-k">=</span> CloneFlags<span class="pl-k">::</span>CLONE_VM
-        <span class="pl-k">|</span> CloneFlags<span class="pl-k">::</span>CLONE_FS
-        <span class="pl-k">|</span> CloneFlags<span class="pl-k">::</span>CLONE_FILES
-        <span class="pl-k">|</span> CloneFlags<span class="pl-k">::</span>CLONE_SIGHAND
-        <span class="pl-k">|</span> CloneFlags<span class="pl-k">::</span>CLONE_THREAD
-        <span class="pl-k">|</span> CloneFlags<span class="pl-k">::</span>CLONE_SYSVSEM
-        <span class="pl-k">|</span> CloneFlags<span class="pl-k">::</span>CLONE_CHILD_CLEARTID
-        <span class="pl-k">|</span> CloneFlags<span class="pl-k">::</span>CLONE_SETTLS;
+<div class="highlight highlight-rust"><pre><span class="pl-k">let</span> <span class="pl-smi">flags</span> <span class="pl-k">=</span> <span class="pl-en">CloneFlags</span><span class="pl-k">::</span><span class="pl-c1">CLONE_VM</span>
+        <span class="pl-k">|</span> <span class="pl-en">CloneFlags</span><span class="pl-k">::</span><span class="pl-c1">CLONE_FS</span>
+        <span class="pl-k">|</span> <span class="pl-en">CloneFlags</span><span class="pl-k">::</span><span class="pl-c1">CLONE_FILES</span>
+        <span class="pl-k">|</span> <span class="pl-en">CloneFlags</span><span class="pl-k">::</span><span class="pl-c1">CLONE_SIGHAND</span>
+        <span class="pl-k">|</span> <span class="pl-en">CloneFlags</span><span class="pl-k">::</span><span class="pl-c1">CLONE_THREAD</span>
+        <span class="pl-k">|</span> <span class="pl-en">CloneFlags</span><span class="pl-k">::</span><span class="pl-c1">CLONE_SYSVSEM</span>
+        <span class="pl-k">|</span> <span class="pl-en">CloneFlags</span><span class="pl-k">::</span><span class="pl-c1">CLONE_CHILD_CLEARTID</span>
+        <span class="pl-k">|</span> <span class="pl-en">CloneFlags</span><span class="pl-k">::</span><span class="pl-c1">CLONE_SETTLS</span>;
 </pre></div>
 <p>Clone flags are tricky to explain, they interact with each other as well, but in short:</p>
 <ol>
@@ -1425,8 +1565,8 @@ we'll get into this as well).</li>
 <p>Now towards the actual implementation of a minimal threading API.</p>
 <h3>API expectation</h3>
 <p>The std library in <code>Rust</code> provides an interface that could be used like this:</p>
-<div class="highlight highlight-rust"><pre><span class="pl-k">let</span> join_handle <span class="pl-k">=</span> std<span class="pl-k">::</span>thread<span class="pl-k">::</span><span class="pl-en">spawn</span>(<span class="pl-k">||</span> <span class="pl-c1">println!</span>(<span class="pl-s">"Hello from my thread!"</span>));
-join_handle.<span class="pl-en">join</span>().<span class="pl-en">unwrap</span>();
+<div class="highlight highlight-rust"><pre><span class="pl-k">let</span> <span class="pl-smi">join_handle</span> <span class="pl-k">=</span> <span class="pl-en">std</span><span class="pl-k">::</span><span class="pl-en">thread</span><span class="pl-k">::</span><span class="pl-en">spawn</span>(<span class="pl-k">||</span> <span class="pl-en">println!</span>(<span class="pl-s"><span class="pl-pds">"</span>Hello from my thread!<span class="pl-pds">"</span></span>));
+<span class="pl-smi">join_handle</span><span class="pl-k">.</span><span class="pl-en">join</span>()<span class="pl-k">.</span><span class="pl-en">unwrap</span>();
 </pre></div>
 <p>A closure that is run on another thread is supplied and a <code>JoinHandle&#x3C;T></code> is returned, the join handle
 can be awaited by calling its <code>join</code>-method, which will block the calling thread until the thread executing the closure
@@ -1448,11 +1588,11 @@ aligned memory depending on what platform we're targeting. We could even just ta
 if we want too.</p>
 <h5>Use the callers stack</h5>
 <div class="highlight highlight-rust"><pre><span class="pl-k">fn</span> <span class="pl-en">clone</span>() {
-    <span class="pl-c">/// 16 kib stack allocation</span>
-    <span class="pl-k">let</span> <span class="pl-k">mut</span> my_stack <span class="pl-k">=</span> [<span class="pl-c1">0u8</span>; <span class="pl-c1">16384</span>];
-    <span class="pl-k">let</span> stack_ptr <span class="pl-k">=</span> my_stack.<span class="pl-en">as_mut_ptr</span>();
-    <span class="pl-c">/// pass through to syscall</span>
-    <span class="pl-en">syscall!</span>(CLONE, ..., stack_ptr, ...);
+<span class="pl-c">    /// 16 kib stack allocation</span>
+    <span class="pl-k">let</span> <span class="pl-k">mut</span> <span class="pl-smi">my_stack</span> <span class="pl-k">=</span> [<span class="pl-c1">0</span><span class="pl-en">u8</span>; <span class="pl-c1">16384</span>];
+    <span class="pl-k">let</span> <span class="pl-smi">stack_ptr</span> <span class="pl-k">=</span> <span class="pl-smi">my_stack</span><span class="pl-k">.</span><span class="pl-en">as_mut_ptr</span>();
+<span class="pl-c">    /// pass through to syscall</span>
+    <span class="pl-en">syscall!</span>(<span class="pl-c1">CLONE</span>, <span class="pl-k">...</span>, <span class="pl-smi">stack_ptr</span>, <span class="pl-k">...</span>);
 }
 </pre></div>
 <p>This is bad for a generic API for a multitude of reasons.
@@ -1478,17 +1618,17 @@ on its stack before starting execution of the task.</p>
 control that we need over the stack, we need to put almost the entire child-thread's lifetime in assembly.</p>
 <p>The structure of the call is mostly stolen from <code>musl</code>, with some changes for this more minimal use-case.
 The rust function will look like this:</p>
-<div class="highlight highlight-rust"><pre><span class="pl-k">extern</span> <span class="pl-s">"C"</span> {
+<div class="highlight highlight-rust"><pre><span class="pl-k">extern</span> <span class="pl-s"><span class="pl-pds">"</span>C<span class="pl-pds">"</span></span> {
     <span class="pl-k">fn</span> <span class="pl-en">__clone</span>(
-        start_fn: <span class="pl-k">usize</span>,
-        stack_ptr: <span class="pl-k">usize</span>,
-        flags: <span class="pl-k">i32</span>,
-        args_ptr: <span class="pl-k">usize</span>,
-        tls_ptr: <span class="pl-k">usize</span>,
-        child_tid_ptr: <span class="pl-k">usize</span>,
-        stack_unmap_ptr: <span class="pl-k">usize</span>,
-        stack_sz: <span class="pl-k">usize</span>,
-    ) -> <span class="pl-k">i32</span>;
+        <span class="pl-smi">start_fn</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
+        <span class="pl-smi">stack_ptr</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
+        <span class="pl-smi">flags</span><span class="pl-k">:</span> <span class="pl-en">i32</span>,
+        <span class="pl-smi">args_ptr</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
+        <span class="pl-smi">tls_ptr</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
+        <span class="pl-smi">child_tid_ptr</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
+        <span class="pl-smi">stack_unmap_ptr</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
+        <span class="pl-smi">stack_sz</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
+    ) <span class="pl-k">-></span> <span class="pl-en">i32</span>;
 }
 </pre></div>
 <ol>
@@ -1520,8 +1660,8 @@ communicate with the calling thread.</li>
 <span class="pl-c">/// - a4 -> x86: r10, aarch64: x3</span>
 <span class="pl-c">/// - a5 -> x86: r8,  aarch64: x4</span>
 <span class="pl-c">/// Pseudocode syscall as extern function: </span>
-<span class="pl-k">extern</span> <span class="pl-s">"C"</span> {
-    <span class="pl-k">fn</span> <span class="pl-en">syscall</span>(nr: <span class="pl-k">usize</span>, a1: <span class="pl-k">usize</span>, a2: <span class="pl-k">usize</span>, a3: <span class="pl-k">usize</span>, a4: <span class="pl-k">usize</span>, a5: <span class="pl-k">usize</span>);
+<span class="pl-k">extern</span> <span class="pl-s"><span class="pl-pds">"</span>C<span class="pl-pds">"</span></span> {
+    <span class="pl-k">fn</span> <span class="pl-en">syscall</span>(<span class="pl-smi">nr</span><span class="pl-k">:</span> <span class="pl-en">usize</span>, <span class="pl-smi">a1</span><span class="pl-k">:</span> <span class="pl-en">usize</span>, <span class="pl-smi">a2</span><span class="pl-k">:</span> <span class="pl-en">usize</span>, <span class="pl-smi">a3</span><span class="pl-k">:</span> <span class="pl-en">usize</span>, <span class="pl-smi">a4</span><span class="pl-k">:</span> <span class="pl-en">usize</span>, <span class="pl-smi">a5</span><span class="pl-k">:</span> <span class="pl-en">usize</span>);
 }
 </pre></div>
 <p>Onto the assembly, it can be boiled down to this:</p>
@@ -1674,7 +1814,7 @@ and the stack isn't deallocated.</p>
 <p>A <code>Rust</code> panic handler could like this:</p>
 <div class="highlight highlight-rust"><pre><span class="pl-c">/// Dummy panic handler</span>
 #[panic_handler]
-<span class="pl-k">pub</span> <span class="pl-k">fn</span> <span class="pl-en">on_panic</span>(info: <span class="pl-k">&#x26;</span>core::panic::PanicInfo) -> ! {
+<span class="pl-k">pub</span> <span class="pl-k">fn</span> <span class="pl-en">on_panic</span>(<span class="pl-smi">info</span><span class="pl-k">:</span> <span class="pl-k">&#x26;</span><span class="pl-en">core</span><span class="pl-k">::</span><span class="pl-en">panic</span><span class="pl-k">::</span><span class="pl-en">PanicInfo</span>) <span class="pl-k">-></span> <span class="pl-k">!</span> {
     <span class="pl-k">loop</span> {}
 }
 </pre></div>
@@ -1696,41 +1836,41 @@ instead we'll use the dreaded <code>tls</code>.</p>
 For <code>x86_64</code> and <code>aarch64</code> there is a specific register we can use to store a pointer to some arbitrary data,
 we can read from that data at any time from any place, in other words, the data is global to the thread.</p>
 <p>In practice:</p>
-<div class="highlight highlight-rust"><pre>#[repr(C)]
-#[derive(Copy, Clone)]
+<div class="highlight highlight-rust"><pre>#[repr(<span class="pl-en">C</span>)]
+#[derive(<span class="pl-en">Copy</span>, <span class="pl-en">Clone</span>)]
 <span class="pl-k">pub</span>(<span class="pl-k">crate</span>) <span class="pl-k">struct</span> <span class="pl-en">ThreadLocalStorage</span> {
-    <span class="pl-c">// First arg needs to be a pointer to this struct, it's immediately dereferenced</span>
-    <span class="pl-k">pub</span>(<span class="pl-k">crate</span>) self_addr: <span class="pl-k">usize</span>,
-    <span class="pl-c">// Info on spawned threads that allow us to unmap the stack later</span>
-    <span class="pl-k">pub</span>(<span class="pl-k">crate</span>) stack_info: <span class="pl-k">Option&#x3C;</span>ThreadDealloc<span class="pl-k">></span>,
+<span class="pl-c">    // First arg needs to be a pointer to this struct, it's immediately dereferenced</span>
+    <span class="pl-k">pub</span>(<span class="pl-k">crate</span>) <span class="pl-smi">self_addr</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
+<span class="pl-c">    // Info on spawned threads that allow us to unmap the stack later</span>
+    <span class="pl-k">pub</span>(<span class="pl-k">crate</span>) <span class="pl-smi">stack_info</span><span class="pl-k">:</span> <span class="pl-en">Option</span>&#x3C;<span class="pl-en">ThreadDealloc</span>>,
 }
-#[repr(C)]
-#[derive(Copy, Clone)]
+#[repr(<span class="pl-en">C</span>)]
+#[derive(<span class="pl-en">Copy</span>, <span class="pl-en">Clone</span>)]
 <span class="pl-k">pub</span>(<span class="pl-k">crate</span>) <span class="pl-k">struct</span> <span class="pl-en">ThreadDealloc</span> {
-    <span class="pl-c">// For the stack dealloc</span>
-    stack_addr: <span class="pl-k">usize</span>,
-    stack_sz: <span class="pl-k">usize</span>,
-    <span class="pl-c">// For the return value dealloc</span>
-    payload_ptr: <span class="pl-k">usize</span>,
-    payload_layout: Layout,
-    <span class="pl-c">// Futex, </span>
-    futex_ptr: <span class="pl-k">usize</span>,
-    <span class="pl-c">// Sync who deallocs</span>
-    sync_ptr: <span class="pl-k">usize</span>,
+<span class="pl-c">    // For the stack dealloc</span>
+    <span class="pl-smi">stack_addr</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
+    <span class="pl-smi">stack_sz</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
+<span class="pl-c">    // For the return value dealloc</span>
+    <span class="pl-smi">payload_ptr</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
+    <span class="pl-smi">payload_layout</span><span class="pl-k">:</span> <span class="pl-en">Layout</span>,
+<span class="pl-c">    // Futex, </span>
+    <span class="pl-smi">futex_ptr</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
+<span class="pl-c">    // Sync who deallocs</span>
+    <span class="pl-smi">sync_ptr</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
 }
 #[inline]
 #[must_use]
-<span class="pl-k">fn</span> <span class="pl-en">get_tls_ptr</span>() -> <span class="pl-k">*mut</span> ThreadLocalStorage {
-    <span class="pl-k">let</span> <span class="pl-k">mut</span> output: <span class="pl-k">usize</span>;
-    #[cfg(target_arch = <span class="pl-s">"x86_64"</span>)]
+<span class="pl-k">fn</span> <span class="pl-en">get_tls_ptr</span>() <span class="pl-k">-></span> <span class="pl-k">*mut</span> <span class="pl-en">ThreadLocalStorage</span> {
+    <span class="pl-k">let</span> <span class="pl-k">mut</span> <span class="pl-smi">output</span><span class="pl-k">:</span> <span class="pl-en">usize</span>;
+    #[cfg(target_arch <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>x86_64<span class="pl-pds">"</span></span>)]
     <span class="pl-k">unsafe</span> {
-        core<span class="pl-k">::</span>arch<span class="pl-k">::</span><span class="pl-en">asm!</span>(<span class="pl-s">"mov {x}, fs:0"</span>, x <span class="pl-k">=</span> <span class="pl-en">out</span>(reg) output);
+        <span class="pl-en">core</span><span class="pl-k">::</span><span class="pl-en">arch</span><span class="pl-k">::</span><span class="pl-en">asm!</span>(<span class="pl-s"><span class="pl-pds">"</span>mov {x}, fs:0<span class="pl-pds">"</span></span>, <span class="pl-smi">x</span> <span class="pl-k">=</span> <span class="pl-en">out</span>(<span class="pl-smi">reg</span>) <span class="pl-smi">output</span>);
     }
-    #[cfg(target_arch = <span class="pl-s">"aarch64"</span>)]
+    #[cfg(target_arch <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>aarch64<span class="pl-pds">"</span></span>)]
     <span class="pl-k">unsafe</span> {
-        core<span class="pl-k">::</span>arch<span class="pl-k">::</span><span class="pl-en">asm!</span>(<span class="pl-s">"mrs {x}, tpidr_el0"</span>, x <span class="pl-k">=</span> <span class="pl-en">out</span>(reg) output);
+        <span class="pl-en">core</span><span class="pl-k">::</span><span class="pl-en">arch</span><span class="pl-k">::</span><span class="pl-en">asm!</span>(<span class="pl-s"><span class="pl-pds">"</span>mrs {x}, tpidr_el0<span class="pl-pds">"</span></span>, <span class="pl-smi">x</span> <span class="pl-k">=</span> <span class="pl-en">out</span>(<span class="pl-smi">reg</span>) <span class="pl-smi">output</span>);
     }
-    output <span class="pl-k">as</span> _
+    <span class="pl-smi">output</span> <span class="pl-k">as</span> <span class="pl-smi">_</span>
 }
 </pre></div>
 <p>This takes us to another of our clone-flags <code>CLONE_SETTLS</code>, we can now allocate and supply a pointer to a
@@ -1746,22 +1886,22 @@ if we don't we let the caller handle it. Then, again we have to exit with some a
 <span class="pl-c">// so it needs to be done in asm.</span>
 <span class="pl-c">// With the stack_ptr and stack_len in rdi/x0 and rsi/x1, respectively we can call mmap then</span>
 <span class="pl-c">// exit the thread</span>
-#[cfg(target_arch = <span class="pl-s">"x86_64"</span>)]
-core<span class="pl-k">::</span>arch<span class="pl-k">::</span><span class="pl-en">asm!</span>(
+#[cfg(target_arch <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>x86_64<span class="pl-pds">"</span></span>)]
+<span class="pl-en">core</span><span class="pl-k">::</span><span class="pl-en">arch</span><span class="pl-k">::</span><span class="pl-en">asm!</span>(
 <span class="pl-c">// Call munmap, all args are provided in this macro call.</span>
-<span class="pl-s">"syscall"</span>,
+<span class="pl-s"><span class="pl-pds">"</span>syscall<span class="pl-pds">"</span></span>,
 <span class="pl-c">// Zero eax from munmap ret value</span>
-<span class="pl-s">"xor eax, eax"</span>,
+<span class="pl-s"><span class="pl-pds">"</span>xor eax, eax<span class="pl-pds">"</span></span>,
 <span class="pl-c">// Move exit into ax</span>
-<span class="pl-s">"mov al, 60"</span>,
+<span class="pl-s"><span class="pl-pds">"</span>mov al, 60<span class="pl-pds">"</span></span>,
 <span class="pl-c">// Exit code 0 from thread.</span>
-<span class="pl-s">"mov rdi, 0"</span>,
+<span class="pl-s"><span class="pl-pds">"</span>mov rdi, 0<span class="pl-pds">"</span></span>,
 <span class="pl-c">// Call exit, no return</span>
-<span class="pl-s">"syscall"</span>,
-<span class="pl-k">in</span>(<span class="pl-s">"rax"</span>) MUNMAP,
-<span class="pl-k">in</span>(<span class="pl-s">"rdi"</span>) map_ptr,
-<span class="pl-k">in</span>(<span class="pl-s">"rsi"</span>) map_len,
-<span class="pl-en">options</span>(nostack, noreturn)
+<span class="pl-s"><span class="pl-pds">"</span>syscall<span class="pl-pds">"</span></span>,
+<span class="pl-en">in</span>(<span class="pl-s"><span class="pl-pds">"</span>rax<span class="pl-pds">"</span></span>) <span class="pl-c1">MUNMAP</span>,
+<span class="pl-en">in</span>(<span class="pl-s"><span class="pl-pds">"</span>rdi<span class="pl-pds">"</span></span>) <span class="pl-smi">map_ptr</span>,
+<span class="pl-en">in</span>(<span class="pl-s"><span class="pl-pds">"</span>rsi<span class="pl-pds">"</span></span>) <span class="pl-smi">map_len</span>,
+<span class="pl-en">options</span>(<span class="pl-smi">nostack</span>, <span class="pl-smi">noreturn</span>)
 );
 </pre></div>
 <p>We also need to remember to deallocate the <code>ThreadLocalStorage</code>, what we keep in the register is just a pointer to
@@ -1818,6 +1958,11 @@ handling, which is something else that I have been dreading getting into.</p>
 			.innerHTML = create_nav_button("Home", "/") + create_nav_button("Table of contents", "/table-of-contents");
 		document.getElementById("content")
 			.innerHTML = STATICPIE_HTML;
+	} else if (location === Location.KBDSMP.path) {
+		document.getElementById("menu")
+			.innerHTML = create_nav_button("Home", "/") + create_nav_button("Table of contents", "/table-of-contents");
+		document.getElementById("content")
+			.innerHTML = KBDSMP_HTML;
 	} else if (location === Location.TEST.path) {
 		document.getElementById("menu")
 			.innerHTML = create_nav_button("Home", "/") + create_nav_button("Table of contents", "/table-of-contents");

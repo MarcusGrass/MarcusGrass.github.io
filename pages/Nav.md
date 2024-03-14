@@ -16,4 +16,5 @@ I made things easier for myself and made navigation happen through this md-page 
 - [Pgwm04 - Wm runs on stable, uses io_uring](/pgwm04)
 - [Threads - Tiny-std has threading support](/threads)
 - [Static pie - Tiny-std can compile as static-pie](/static-pie)
+- [Keyboard SMP - Multithreading in your keyboard](/kbd-smp)
 - [Test](/test)

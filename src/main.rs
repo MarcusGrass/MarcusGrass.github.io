@@ -18,6 +18,7 @@ const LOCATIONS: &[LocationInfo] = &[
     LocationInfo::new("/pgwm04", "Pgwm04"),
     LocationInfo::new("/threads", "Threads"),
     LocationInfo::new("/static-pie", "StaticPie"),
+    LocationInfo::new("/kbd-smp", "KbdSmp"),
     LocationInfo::new("/test", "Test"),
 ];
 
@@ -267,13 +268,17 @@ fn copy_minified(ws: &Path) -> Result<(), String> {
         let ext_str = ext
             .to_str()
             .ok_or_else(|| format!("Found non utf8 file extension {ext:?}"))?;
-        let content = std::fs::read_to_string(&path)
+        let content = std::fs::read(&path)
             .map_err(|e| format!("Failed to read content for {path:?} {e}"))?;
         let minified = match ext_str {
-            "css" => minifier::css::minify(&content)
+            "css" => minifier::css::minify(&String::from_utf8(content).unwrap())
                 .map_err(|e| format!("Failed to minify {path:?} {e}"))?
                 .to_string(),
-            "js" => minifier::js::minify(&content).to_string(),
+            "js" => minifier::js::minify(&String::from_utf8(content).unwrap()).to_string(),
+            "jpg" => {
+                std::fs::write(dist_static.join(&path.file_name().unwrap()), &content).expect("Failed to copy static image");
+                continue;
+            }
             _ => {
                 return Err(format!(
                     "Only .js and .css files allowed in static dir {:?} found {path:?}",
