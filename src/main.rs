@@ -73,6 +73,11 @@ fn format_html(md_content: MdContent) -> Result<String, String> {
             HOME.path_name, HOME_LABEL, NAV.path_name, NAV_LABEL
         )
     };
+    let title = if md_content.location_info == HOME {
+        "Marcus Grass' pages"
+    } else {
+        name.as_str()
+    };
     let html_content = format!(
         r#"
 <!DOCTYPE html>
@@ -83,7 +88,7 @@ fn format_html(md_content: MdContent) -> Result<String, String> {
     <link rel="stylesheet" href="static/styles.css">
     <link rel="stylesheet" href="static/github-markdown.css">
     <link rel="stylesheet" href="static/starry_night.css">
-    <title>{name}</title>
+    <title>{title}</title>
 </head>
 <body>
 <div id="menu">
@@ -105,6 +110,7 @@ fn format_html(md_content: MdContent) -> Result<String, String> {
 }
 
 // Should really be done by the webserver, but this is github pages so.
+// Reroute page if it matches the name to the html file
 fn create_404() -> String {
     let mut script_inner = String::new();
     for loc in LOCATIONS {
@@ -131,9 +137,7 @@ fn create_404() -> String {
 fn recurse_convert_pages(md_root: &Path, root_offset: &Path) -> Result<Vec<MdContent>, String> {
     let search = md_root.join(root_offset);
     let mut files_here = vec![];
-    for entry in
-        std::fs::read_dir(search).map_err(|e| format!("Failed to read {md_root:?} {e}"))?
-    {
+    for entry in std::fs::read_dir(search).map_err(|e| format!("Failed to read {md_root:?} {e}"))? {
         let entry = entry.map_err(|e| format!("Failed to read entry from {md_root:?} {e}"))?;
         let metadata = entry
             .metadata()
