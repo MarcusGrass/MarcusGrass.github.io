@@ -144,26 +144,29 @@ although that's not particularly important to performance.
 Threading without multiprocessing can produce concurrency, like in [Python](https://www.python.org/) with 
 the [GIL](https://wiki.python.org/moin/GlobalInterpreterLock) enabled, 
 a programmer can run multiple tasks at the same time and if those tasks don't 
-require CPU-time, such as waiting for some io, the tasks can make progress at the same time which 
-is why Python with the GIL can still run webservers pretty well. However, tasks that require CPU-time to make 
-progress will not benefit from having more threads.  
+require CPU-time, such as waiting for some io, the tasks can make progress at the same time, which 
+is why Python with the GIL can run webservers pretty well. However, tasks that require CPU-time to make 
+progress will not benefit from having more threads in the single-core case.  
 
 One more caveat are blocking tasks that do not park the thread, this will come down to how to the OS decides to schedule 
 things: In a single-core scenario, the main thread offloads some io-work to a separate thread, 
 the OS schedules (simplified) 1 millisecond to the io-thread, but that thread is stuck waiting for io to complete, 
-then the application will make no progress. One way to mitigate this is to park the waiting thread inside your 
+the application will make no progress for that millisecond.
+One way to mitigate this is to park the waiting thread inside the 
 io-api, then waking it up on some condition, in that case the blocking io won't hang the application.
 
 In my case, SMP not being enabled meant that the oled-drawer-thread just got starved of CPU-time resulting in 
-drawing to the oled being painfully slow, but even if it hadn't been, there would have been a performance hit because 
-it would have interfered with the regular key-processing.
+drawing to the oled being painfully slow, but even if it hadn't been, there may have been a performance hit because 
+it could have interfered with the regular key-processing.
 
 ### Parallelism
 
-I know I have two cores, I'll just have to enable [SMP](https://en.wikipedia.org/wiki/Symmetric_multiprocessing). Symmetric multiprocessing means that the processor can actually
-do things in parallel. it's not enabled by default. Chibios has some [documentation on this](https://www.chibios.org/dokuwiki/doku.php?id=chibios:articles:smp_rt7).  
+I know I have two cores, parallelism should therefore be possible, I'll just have to enable 
+[Symmetric multiprocessing(SMP)](https://en.wikipedia.org/wiki/Symmetric_multiprocessing). 
+SMP means that the processor can actually do things in parallel. 
+It's not enabled by default, Chibios has some [documentation on this](https://www.chibios.org/dokuwiki/doku.php?id=chibios:articles:smp_rt7).  
 
-But this time, it wasn't enough. Enabling SMP, is not trivial as it turns out, it needs a config flag for chibios,
+Enabling SMP, is not trivial as it turns out, it needs a config flag for chibios,
 a makeflag when building for the platform (rp2040), and some other fixing. 
 So I had to mess with the firmware once more, 
 but checking some flags in the code, and some internal structures, I can see that `Chibios` is now compiled 
@@ -172,6 +175,7 @@ ready to use SMP, it even has a reference that I can use to my other core's cont
 On `Linux` multicore and multithreading is opaque, you spawn a thread, it runs on some core (also assuming that 
 SMP is enabled, but it generally is for servers and desktops). On Chibios, if you
 spawn a thread, it runs on the core that spawned it by default.  
+
 Back to the docs, I see that I can instead create a thread from a [thread descriptor](https://chibiforge.org/doc/21.11/full_rm/group__threads.html#gad51eb52a2e308ba1cb6e5cd8a337817e), 
 which takes a reference to the instance-context, `&ch1`, perfect, now I'll spawn a thread on the other core, happily ever 
 after.  
@@ -200,6 +204,10 @@ and I can draw as much and often as I want to the oled display.
 I had to mess a bit with the firmware to specify that there is an extra 
 core on the RP2040, and to keep `QMK`s hands off of oled state, since 
 that code isn't thread-safe.  
+
+In reality this kind of optimization probably isn't necessary, but if there is work that the keyboard is doing 
+that's triggered by key processing, such as rgb-animations, oled-animations, and similar. Offloading that 
+to a separate core could improve performance, allowing more of that kind of work for a given keyboard.  
 
 The code is in my fork [here](https://github.com/MarcusGrass/qmk_firmware/tree/mg/lily58), 
 with commits labeled `[FIRMWARE]` being the ones messing with the firmware.
