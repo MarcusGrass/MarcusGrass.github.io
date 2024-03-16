@@ -139,11 +139,29 @@ It would hold up better on a regular OS like `Linux`, but on `Chibios` it's a bi
 Disregarding that `Chibios` spawns both a main-thread, and an idle-thread (on the same core) by default, so it's not just one, 
 although that's not particularly important to performance.
 
-### I have two cores, I just have to enable Symmetric multiprocessing
+### On concurrency vs parallelism
 
-I know I have two cores, I'll just have to enable [SMP](https://en.wikipedia.org/wiki/Symmetric_multiprocessing).
-Symmetric multiprocessing means that the processor can actually
-do things in parallel, it's not enabled by default. Chibios has some [documentation on this](https://www.chibios.org/dokuwiki/doku.php?id=chibios:articles:smp_rt7).  
+Threading without multiprocessing can produce concurrency, like in [Python](https://www.python.org/) with 
+the [GIL](https://wiki.python.org/moin/GlobalInterpreterLock) enabled, 
+a programmer can run multiple tasks at the same time and if those tasks don't 
+require CPU-time, such as waiting for some io, the tasks can make progress at the same time which 
+is why Python with the GIL can still run webservers pretty well. However, tasks that require CPU-time to make 
+progress will not benefit from having more threads.  
+
+One more caveat are blocking tasks that do not park the thread, this will come down to how to the OS decides to schedule 
+things: In a single-core scenario, the main thread offloads some io-work to a separate thread, 
+the OS schedules (simplified) 1 millisecond to the io-thread, but that thread is stuck waiting for io to complete, 
+then the application will make no progress. One way to mitigate this is to park the waiting thread inside your 
+io-api, then waking it up on some condition, in that case the blocking io won't hang the application.
+
+In my case, SMP not being enabled meant that the oled-drawer-thread just got starved of CPU-time resulting in 
+drawing to the oled being painfully slow, but even if it hadn't been, there would have been a performance hit because 
+it would have interfered with the regular key-processing.
+
+### Parallelism
+
+I know I have two cores, I'll just have to enable [SMP](https://en.wikipedia.org/wiki/Symmetric_multiprocessing). Symmetric multiprocessing means that the processor can actually
+do things in parallel. it's not enabled by default. Chibios has some [documentation on this](https://www.chibios.org/dokuwiki/doku.php?id=chibios:articles:smp_rt7).  
 
 But this time, it wasn't enough. Enabling SMP, is not trivial as it turns out, it needs a config flag for chibios,
 a makeflag when building for the platform (rp2040), and some other fixing. 
