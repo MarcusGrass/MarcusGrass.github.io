@@ -1,12 +1,24 @@
 # Symmetric multiprocessing in your keyboard
 
 While my daughter sleeps during my parental leave I manage to get up to 
-more than I thought I would, this time, a deep-dive into [QMK](https://docs.qmk.fm/#/).
+more than I thought I would. This time, a deep-dive into [QMK](https://docs.qmk.fm/#/).
+
+## Overview
+
+This writeup is about how I enabled multicore processing on my keyboard, 
+the structure is as follows:
+
+1. A short intro to `QMK`.
+2. A dive into keyboards, briefly how they function.
+3. Microcontrollers and how they interface with the keyboard.
+4. Threading on Chibios.
+5. Multithread vs multicore, concurrency vs parallelism.
+6. Tying it together.
 
 ## QMK and custom keyboards
 
 `QMK` contains open source firmware for keyboards, it provides implementations for most custom keyboard functionality, 
-like kepyresses (that one's obvious), rotary encoders, and oled screens.  
+like key presses (that one's obvious), rotary encoders, and oled screens.  
 
 It can be thought of as an OS for your keyboard, which can be configured by plain `json`, 
 with [online tools](https://config.qmk.fm/#/xelus/kangaroo/rev1/LAYOUT_ansi_split_bs_rshift), and other 
@@ -43,15 +55,15 @@ void oled_write(const char *data, bool invert);
 ```
 Above is an API that allows you to write text to an `oled` screen, very convenient.
 
-Crucially, `QMK` does actually ship an OS, in my case [chibios](https://chibiforge.org/doc/21.11/full_rm/), 
-which is a full-featured [RTOS](https://en.wikipedia.org/wiki/Real-time_operating_system). That OS contains 
-the drivers for my microcontrollers, and from my custom code, I can interface with 
+Crucially, `QMK` does actually ship an OS, in my case [chibios](https://chibiforge.org/doc/21.11/full_rm/).
+Chibios is a full-featured [RTOS](https://en.wikipedia.org/wiki/Real-time_operating_system). That OS contains 
+the drivers for my microcontrollers, and from my custom code I can interface with 
 the operating system.
 
 ## Keyboards keyboards keyboards
 
-I have been building keyboards since I started working as a programmer,
-there is much that can be said about them, but not a lot of is particularly interesting, I'll give a brief 
+I have been building keyboards since I started working as a programmer.
+There is much that can be said about them, but not a lot of it is particularly interesting. I'll give a brief 
 explanation of how they work.
 
 ### Keyboard internals
@@ -62,7 +74,7 @@ what keys are being pressed.
 Here are three arbitrarily chosen important components to a keyboard:
 
 1. The [Printed Circuit Board (PCB)](https://en.wikipedia.org/wiki/Printed_circuit_board), it's a large 
-chip that connects all the keyboard components, if you're thinking: "Hey that's a motherboard!", then you 
+chip that connects all the keyboard components. If you're thinking: "Hey that's a motherboard!", then you 
 aren't far off. Split keyboards (usually) have two PCBs working in tandem, connected by (usually) an aux cable.  
 2. The microcontroller, the actual computer part that you program. It can be integrated directly with the PCB,
 or soldered on to it.
@@ -76,7 +88,7 @@ I used an [Iris](https://keeb.io/collections/iris-split-ergonomic-keyboard) for 
 but [ARM](https://en.wikipedia.org/wiki/ARM_architecture_family) came out, surpassing the AVR ones in cost-efficiency, memory, and speed, while being compatible, 
 I felt I needed an upgrade.
 
-A colleague tipped me off about [lily58](https://splitkb.com/products/aurora-lily58), which takes any[pro-micro](https://github.com/sparkfun/Pro_Micro)-compatible microcontroller, 
+A colleague tipped me off about [lily58](https://splitkb.com/products/aurora-lily58), which takes any [pro-micro](https://github.com/sparkfun/Pro_Micro)-compatible microcontroller, 
 so I bought it. Alongside a couple of [RP2040](https://www.raspberrypi.com/documentation/microcontrollers/rp2040.html)-based microcontrollers.
 
 ### RP2040 and custom microcontrollers
@@ -85,10 +97,10 @@ Another slight derailment, the RP2040 microcontroller is a microcontroller with 
 [Arm-cortex-m0+ cpu](https://developer.arm.com/Processors/Cortex-M0-Plus). Keyboard-makers take this kind 
 of microcontroller, and customize them to fit keyboards, since pro-micro microcontrollers have influenced a lot 
 of the keyboard PCBs, many new microcontroller designs fit onto a PCB the same way that a pro-micro does. Meaning, 
-often times you can use many combinations of microcontrollers, with many combinations of PCBs.
+often you can use many combinations of microcontrollers, with many combinations of PCBs.
 
 The arm-cortex-m0+ cpu is pretty fast, cheap, and has two cores, TWO CORES, why would someone even need that? 
-If there are two cores on there, then they should both definitely be used, however.
+But, if there are two cores on there, then they should both definitely be used.
 
 ## Back to the story, pt2
 
@@ -98,11 +110,11 @@ if it takes too long it may impact the core functionality of key-pressing and re
 
 Now I found the purpose of multicore, if rendering to the oled takes time, 
 then that job could (and therefore should) be shoveled onto a 
-different thread, my keyboard has 2 cores, I should parallelize this by using a thread! 
+different thread. My keyboard has 2 cores, I should parallelize this by using a thread! 
 
 ## Chibios and threading
 
-Chibios is very well documented, it even 
+Chibios is very well documented; it even 
 [has a section on threading](https://chibiforge.org/doc/21.11/full_rm/group__threads.html), and it even has a 
 convenience function for 
 [spawning a static thread](https://chibiforge.org/doc/21.11/full_rm/group__threads.html#gabf1ded9244472b99cef4dfa54caecec4).  
@@ -131,8 +143,12 @@ to the `oled` display on a separate thread, great! Now why is performance so bad
 When I printed the core-id of the thread rendering to the `oled`-display, it was `0`. I wasn't 
 actually using the extra core which would have core-id `1`.
 
-The assumption that: If I have two cores and I have two threads, the two threads should be running 
-or at least be available to accept tasks almost 100% of the time, does not hold here. 
+The assumption that: 
+
+> If I have two cores and I have two threads, the two threads should be running 
+or at least be available to accept tasks almost 100% of the time.
+
+does not hold here. 
 It would hold up better on a regular OS like `Linux`, but on `Chibios` it's a bit more explicit.
 
 **Note:**
@@ -142,8 +158,7 @@ although that's not particularly important to performance.
 ### On concurrency vs parallelism
 
 Threading without multiprocessing can produce concurrency, like in [Python](https://www.python.org/) with 
-the [GIL](https://wiki.python.org/moin/GlobalInterpreterLock) enabled, 
-a programmer can run multiple tasks at the same time and if those tasks don't 
+the [GIL](https://wiki.python.org/moin/GlobalInterpreterLock) enabled. A programmer can run multiple tasks at the same time and if those tasks don't 
 require CPU-time, such as waiting for some io, the tasks can make progress at the same time, which 
 is why Python with the GIL can run webservers pretty well. However, tasks that require CPU-time to make 
 progress will not benefit from having more threads in the single-core case.  
@@ -166,7 +181,7 @@ I know I have two cores, parallelism should therefore be possible, I'll just hav
 SMP means that the processor can actually do things in parallel. 
 It's not enabled by default, Chibios has some [documentation on this](https://www.chibios.org/dokuwiki/doku.php?id=chibios:articles:smp_rt7).  
 
-Enabling SMP, is not trivial as it turns out, it needs a config flag for chibios,
+Enabling SMP is not trivial as it turns out, it needs a config flag for chibios,
 a makeflag when building for the platform (rp2040), and some other fixing. 
 So I had to mess with the firmware once more, 
 but checking some flags in the code, and some internal structures, I can see that `Chibios` is now compiled 
@@ -177,14 +192,14 @@ SMP is enabled, but it generally is for servers and desktops). On Chibios, if yo
 spawn a thread, it runs on the core that spawned it by default.  
 
 Back to the docs, I see that I can instead create a thread from a [thread descriptor](https://chibiforge.org/doc/21.11/full_rm/group__threads.html#gad51eb52a2e308ba1cb6e5cd8a337817e), 
-which takes a reference to the instance-context, `&ch1`, perfect, now I'll spawn a thread on the other core, happily ever 
+which takes a reference to the instance-context, `&ch1`. Perfect, now I'll spawn a thread on the other core, happily ever 
 after.  
 
 **WRONG!**  
 
 It still draws from core-0 on the oled.
  
-Checking the chibios source code, I see that it falls back to `&ch0` if `&ch1` is null, now why is it null?
+Checking the chibios source code, I see that it falls back to `&ch0` if `&ch1` is `null`, now why is it `null`?
 
 ### Main 2, a single main function is for suckers
 
@@ -193,7 +208,7 @@ a demo someone made of SMP on the RP2040, it needs a separate main function wher
 for the new core is initialized. I write some shim-code, struggle with some more configuration, and finally, 
 core 1 is doing the `oled` work.  
 
-Performance is magical, it's all worth in it the end.  
+Performance is magical, it's all worth it in the end.  
 
 ## Conclusion
 
@@ -205,7 +220,8 @@ I had to mess a bit with the firmware to specify that there is an extra
 core on the RP2040, and to keep `QMK`s hands off of oled state, since 
 that code isn't thread-safe.  
 
-In reality this kind of optimization probably isn't necessary, but if there is work that the keyboard is doing 
+In reality this kind of optimization probably isn't necessary for most users, 
+but if there is work that the keyboard is doing
 that's triggered by key processing, such as rgb-animations, oled-animations, and similar. Offloading that 
 to a separate core could improve performance, allowing more of that kind of work for a given keyboard.  
 
