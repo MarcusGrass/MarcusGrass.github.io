@@ -205,3 +205,59 @@ If `row1` is now low switch `1, 0`, first key on the second row, is being presse
 
 Now I can detect which keys are being pressed, useful functionality for a keyboard.  
 
+### Split keyboards
+
+Looking back at the [schematic](https://docs.splitkb.com/hc/en-us/article_attachments/8356613654940) I see that there's a pin
+labeled side-indicator, that either goes to ground or voltage. After a brief check it reads, as expected, high on the left
+side, and low on the right side.
+
+Now that I can detect which keys are being pressed, by coordinates, and which side is being run,
+it's time to transmit key-presses from the right-side to the left. 
+
+The reason to do it that way is that the left is the side that I'm planning on connecting to the computer with a 
+usb-cable. Now, I could have written to code to be side-agnostic, checking whether a USB-cable is connected and choosing 
+whether to send key-presses over the wire connecting the sides, or the USB-cable. But, that approach both increases 
+complexity and binary size, so I opted not to.  
+
+#### Bits over serial
+
+Looking at the schematics again, I see that one pin is labeled `DATA`, that pin is the one connected to the 
+pad that the [TRRS cable](https://splitkb.com/products/coiled-angled-trrs-cable) connects the sides with.  
+However, there is only one pin on each side, which means that all communication is limited to high/low on a single 
+pin. Transfer is therefore limited to one bit at a time.
+
+Looking over the default configuration for my keyboard in QMK the [BitBang](https://github.com/qmk/qmk_firmware/blob/master/docs/serial_driver.md) 
+driver is used since nothing else is specified, there are also USART, single- and full-duplex available.  
+
+#### UART/USART
+
+[UART](https://en.wikipedia.org/wiki/Universal_asynchronous_receiver-transmitter) stands for Universal Asynchronous 
+Receiver-Transmitter, and is a protocol (although the wiki says a peripheral device, terminology unclear) 
+to send bits over a wire.  
+
+There is a UART-implementation for the rp2040, in the [rp-hal-crate](https://github.com/rp-rs/rp-hal), but it 
+assumes usage of the builtin uart-peripheral, that uses both an RX and TX-pin in a set position, in my case 
+I want to either have half-duplex communication (one side communicates at a time), or simplex communication from right
+to left. That means that the `DATA`-pin on the left side should be UART-RX (receiver) while the `DATA`-pin on 
+the right is UART-TX (transmitter).  
+
+I search further for single-pin UART and find out about [PIO](https://tutoduino.fr/en/pio-rp2040-en/).
+
+#### PIO
+
+The rp2040 has blocks with state-machines which can run like a separate processor manipulating and reading 
+pin-states, these can be programmed with specific assembly, and there just happens to be someone 
+who programmed a uart-implementation in that assembly [here](https://github.com/raspberrypi/pico-examples/blob/master/pio/uart_rx/uart_rx.pio).  
+
+It also turns out that someone ported that implementation to a Rust library [here](https://github.com/Sympatron/pio-uart).  
+
+I hooked up the RX-part to the left side, and the TX to the right, and it worked!
+
+*Note* 
+
+You could probably make a single-pin half-duplex uart implementation by modifying the above pio-asm by not that much.
+You'd just have to figure out how to wait on either data in the input register from the user program, or communication 
+starting from the other side. There's a race-condition there though, maybe I'll get to that later.
+
+
+
