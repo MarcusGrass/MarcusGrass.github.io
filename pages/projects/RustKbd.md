@@ -23,7 +23,8 @@ microcontroller.
 
 ## Notes/Areas
 
-- Inlining
+- Performance
+- Inlining / I-cache / Scan rate vs press/release for latency
 - Unsafe
 - Static mut refs
 - multicore
@@ -31,6 +32,8 @@ microcontroller.
 - gpio pins
 - stack overflow
 - jitter
+- Multiple keypresses
+- Reliability
 
 ## On the last episode of 'Man wastes time reinventing the wheel'
 
@@ -259,5 +262,75 @@ You could probably make a single-pin half-duplex uart implementation by modifyin
 You'd just have to figure out how to wait on either data in the input register from the user program, or communication 
 starting from the other side. There's a race-condition there though, maybe I'll get to that later.
 
+#### Byte-protocol
 
+Since I'm using hardware to send data bit-by-bit I made a slimmed-down protocol. The right side has 28 buttons and a
+rotary-encoder. A delta can be fit into a single byte. 
 
+Visualizing the keyboard's keys as a matrix with `5` rows, and `6` columns there's at most 30 keys. 
+The keys can be translated into a matrix-index where `0,0` => `0`, `1,0` -> `6`, `2, 3` -> `15`, by rolling out 
+the `2d`-array into a `1d` one.
+
+In the protocol, the first 5 bits gives the matrix-index of the key that changed. The 6th bit is whether 
+that key was pressed or released, the 7th bit indicates whether the rotary-encoder has a change, and the 8th 
+bit indicates whether that change was clock- or counter-clockwise.  
+
+For better or worse, all byte-values are valid, although some may represent keys that do not exist, since there are 
+28 keys, but 32 slots for the 5 bits indicating the matrix-index.  
+
+I used the [bitvec](https://docs.rs/bitvec/latest/bitvec/) crate for bit-manipulation, that library is excellent.  
+
+## Keymap
+
+Now, to send key-presses to the OS, [of course there's a crate for that](https://docs.rs/usbd-hid/latest/usbd_hid/).
+
+It helps with the plumbing and exposes the struct that I've got to send to the OS (and the API to do the sending), 
+I just have to fill it with reasonable values: 
+
+```rust
+/// Struct that the OS wants
+pub struct KeyboardReport {
+    pub modifier: u8,
+    pub reserved: u8,
+    pub leds: u8,
+    pub keycodes: [u8; 6],
+}
+```
+
+I found [this pdf from usb.org](https://usb.org/sites/default/files/hut1_3_0.pdf), which specifies keycode and modifier 
+values. I encoded those [as a struct](https://github.com/MarcusGrass/rp2040-kbd/blob/main/rp2040-kbd/src/hid/keycodes.rs#L3).
+
+```rust
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct KeyCode(pub u8);
+
+#[allow(dead_code)]
+impl KeyCode {
+    //Keyboard = 0x01; //ErrorRollOver1 Sel N/A 3 3 3 4/101/104
+    //Keyboard = 0x02; //POSTFail1 Sel N/A 3 3 3 4/101/104
+    //Keyboard = 0x03; //ErrorUndefined1 Sel N/A 3 3 3 4/101/104
+    pub const A: Self = Self(0x04); //a and A2 Sel 31 3 3 3 4/101/104
+    pub const B: Self = Self(0x05); //b and B Sel 50 3 3 3 4/101/104
+    // ... etc etc etc
+```
+
+Now I know which button is pressed by coordinates, and how to translate those to values that the OS can understand.  
+
+And it works! Kind of...
+
+### Protocol?
+
+I will admit that I did not read the entire PDF, what I did find out was that there's a poll-rate that the OS specifies, 
+I set that at the lowest possible value, 1ms. Each 1 ms the OS triggers an interrupt:
+
+```rust
+/// Interrupt handler
+/// Safety: Called from the same core that publishes
+#[interrupt]
+#[allow(non_snake_case)]
+#[cfg(feature = "hiddev")]
+unsafe fn USBCTRL_IRQ() {
+    crate::runtime::shared::usb::hiddev_interrupt_poll();
+}
+```
