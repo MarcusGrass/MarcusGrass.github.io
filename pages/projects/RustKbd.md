@@ -29,6 +29,8 @@ microcontroller.
 - multicore
 - uart
 - gpio pins
+- stack overflow
+- jitter
 
 ## On the last episode of 'Man wastes time reinventing the wheel'
 
