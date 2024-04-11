@@ -19,7 +19,11 @@ microcontroller.
 4. Figuring out the MCU<->PCB interplay using QMK
 5. Split keyboard communication woes
 6. Keymaps
-7. Tying it together.
+7. USB HID Protocol
+8. OLED displays
+9. BUUUUGS
+10. Performance
+11. Tying it together.
 
 ## Notes/Areas
 
@@ -319,7 +323,7 @@ Now I know which button is pressed by coordinates, and how to translate those to
 
 And it works! Kind of...
 
-### Protocol?
+### USB HID Protocol?
 
 I will admit that I did not read the entire PDF, what I did find out was that there's a poll-rate that the OS specifies, 
 I set that at the lowest possible value, 1ms. Each 1 ms the OS triggers an interrupt:
@@ -334,3 +338,228 @@ unsafe fn USBCTRL_IRQ() {
     crate::runtime::shared::usb::hiddev_interrupt_poll();
 }
 ```
+
+#### Oh right Interrupts
+
+[Interrupts](https://en.wikipedia.org/wiki/Interrupt) are ways for the processor to interrupt current executing code 
+and executing something else, they are similar to [Linux signal handlers](https://man7.org/linux/man-pages/man7/signal.7.html).
+
+In this specific case, the USB-peripheral generates an interrupt when polled, the core that registered an interrupt 
+handler for that specific interrupt (`USBCTRL_IRQ`) will pause current execution and run the code contained in 
+the interrupt-handler.  
+
+This has potential of triggering UB with unsafe code (depending on where the core was stopped, it may have been holding 
+a mutable reference which the interrupt handler needs), and deadlocks with code that guards against multiple mutable 
+references through locking.  
+
+One way to handle this, if using mutable statics (which you almost certainly have to without an allocator), 
+is to execute sensitive code within a `critical_section`, of course, 
+[there's a library for that](https://docs.rs/critical-section/latest/critical_section/).  
+The critical-section, when entered, causes the core to ignore interrupts until exited.
+
+```Rust
+// Both of these functions use the same static mut variable
+
+#[cfg(feature = "hiddev")]
+pub unsafe fn try_push_report(keyboard_report: &usbd_hid::descriptor::KeyboardReport) -> bool {
+    // This core won't be interrupted while handling the mutable reference.
+    // A regular lock without a critical section here would cause a deadlock in the below interrupt handling procedure 
+    // if timing is unfortunate.
+    critical_section::with(|_cs| {
+        USB_HIDDEV
+            .as_mut()
+            .is_some_and(|hid| hid.try_submit_report(keyboard_report))
+    })
+}
+
+#[cfg(feature = "hiddev")]
+pub unsafe fn hiddev_interrupt_poll() {
+    // This core won't be interrupted, because there's only one interrupt registered, so there's nothing to interrupt this.
+    // Since it's already interrupted the core that handles the other mutable reference to this variable 
+    // we can be certain that this is the only mutable reference active without a critical section or other lock.
+    if let Some(hid) = USB_HIDDEV.as_mut() {
+        hid.poll();
+    }
+}
+```
+
+### USB HID protocol
+
+Back to the protocol, the API has two ends, one for polling the OS, one for submitting HID-reports.  
+It turns out that even if you don't expect any data from the OS the device needs to be polled to communicate.  
+
+In my first shot I just pushed keyboard reports on every diff and polling immediately after. This caused 
+key-actions to disappear, they didn't reach the OS. 
+
+I still haven't quite figured out why since I'm not overflowing the buffer, digging into the code didn't help me 
+understand much either, but it was pretty opaque.  
+
+I settled for pushing at most one keyboard report per poll, that means at most one per ms. 
+This means a worst case latency of 1ms on a key-action assuming there's no backup, I keep eventual unpublishable 
+reports in a queue that's drained 1 entry per poll. Again, there may be something written in the specifications 
+about this, but it's good enough for now.
+
+## Oled displays
+
+One of the motivators for using multiple cores were the ability to render to oled on-demand with low latency.  
+
+Drawing to an oled display is comparatively slow, so offloading that to a separate core was something that I was interested 
+in doing.  
+
+I created a shared message queue guarded by a spin-lock:
+
+```rust
+#[derive(Debug, Copy, Clone)]
+pub enum KeycoreToAdminMessage {
+    // Notify on any user action
+    Touch,
+    // Send loop count to calculate scan latency
+    Loop(LoopCount),
+    // Output which layer is active
+    LayerChange(KeymapLayer),
+    // Output bytes received over UART
+    Rx(u16),
+    // Write a boot message then trigger usb-boot
+    Reboot,
+}
+```
+
+When displayed it looks like this:
+
+![oleds](/static/rust-kbd-oled.jpg)
+
+Setting it up was pretty trivial, there's a library for [SSD1306 oleds](https://docs.rs/ssd1306/latest/ssd1306/) 
+which works great!
+
+Now I have a keyboard that can submit keypresses to the OS, and display some debug information on it's oleds, 
+time to get into the bugs.  
+
+## BUUUUUUUGS
+
+Almost immediately when trying to type I discovered that keys would be repeated, pressing t would result in 
+19 t's for example.
+
+### Spooky electrons, debounce!
+
+I looked into QMK once more, since my keyboard with QMK firmware doesn't have issues (IE not a hardware problem).  
+
+Here's the function that reads pins: 
+
+```c
+/// quantum/matrix.c
+__attribute__((weak)) void matrix_read_rows_on_col(matrix_row_t current_matrix[], uint8_t current_col, matrix_row_t row_shifter) {
+    bool key_pressed = false;
+
+    // Select col
+    if (!select_col(current_col)) { // select col
+        return;                     // skip NO_PIN col
+    }
+    matrix_output_select_delay();
+
+    // For each row...
+    for (uint8_t row_index = 0; row_index < ROWS_PER_HAND; row_index++) {
+        // Check row pin state
+        if (readMatrixPin(row_pins[row_index]) == 0) {
+            // Pin LO, set col bit
+            current_matrix[row_index] |= row_shifter;
+            key_pressed = true;
+        } else {
+            // Pin HI, clear col bit
+            current_matrix[row_index] &= ~row_shifter;
+        }
+    }
+
+    // Unselect col
+    unselect_col(current_col);
+    matrix_output_unselect_delay(current_col, key_pressed); // wait for all Row signals to go HIGH
+}
+```
+
+I had looked at it previously, but disregarded those delays (`matrix_output_select_delay()` and 
+`matrix_output_unselect_delay(current_col, key_pressed); // wait for all Row signals to go HIGH`), because 
+we're trying to be speedy here. Thread.sleep() isn't speedy, everyone knows that.  
+
+However, it turns out that they are important. Again I have to follow weak functions, a nightmare: 
+
+```c
+/// quantum/matrix_common.c
+__attribute__((weak)) void matrix_output_select_delay(void) {
+    waitInputPinDelay();
+}
+
+-> 
+
+/// platform/chibios/_wait.h
+#ifndef GPIO_INPUT_PIN_DELAY
+#    define GPIO_INPUT_PIN_DELAY (CPU_CLOCK / 1000000L / 4)
+#endif
+
+#define waitInputPinDelay() wait_cpuclock(GPIO_INPUT_PIN_DELAY)
+
+```
+
+I get no editor support in this project, so I have to grep through countless board implementations until I found 
+the correct one, which isn't exactly easy to tell. But, after setting the `col`-pin to `low`, there's a `250ns` wait.
+
+I implement it, and it changes nothing. On to the next!
+
+```c
+/// quantum/matrix_common.c
+__attribute__((weak)) void matrix_output_unselect_delay(uint8_t line, bool key_pressed) {
+    matrix_io_delay();
+}
+
+/* `matrix_io_delay ()` exists for backwards compatibility. From now on, use matrix_output_unselect_delay(). */
+__attribute__((weak)) void matrix_io_delay(void) {
+    wait_us(MATRIX_IO_DELAY);
+}
+
+#ifndef MATRIX_IO_DELAY
+#    define MATRIX_IO_DELAY 30
+#endif
+```
+
+for all of the above symbols, I need to check that it's not specifically overridden by my keyboard implementation, 
+none were `matrix_output_unselect_delay(current_col, key_pressed)` therefore waits `30μs`. 
+
+I add the delay and the number of t's go from 19 to sometimes *many*, good not great. But, my scan-rate which is directly influencing 
+latency on presses goes from around `40μs` to `200μs+` (6 columns, each with a `30μs` sleep), unacceptable. The above code did come with a comment, 
+it wants the row-pins to settle back into `high`, so I could just check for that instead!
+
+```rust
+// Wait for all rows to settle
+for row in rows {
+    while matches!(row.0.is_low(), Ok(true)) {}
+}
+```
+
+Now latency lands around `50μs`. I still have that issue of the many t's, but at least it didn't get worse.
+
+I hook up the keyboard to `picocom` and start reading output lines.  
+I output each state-delta as `M0, R0, C0 -> true [90237]`, matrix index, row_index, column index, and whether the key
+is pressed or not, followed by the number of microseconds since the last state-change.
+
+I can see that the activation-behavior is strange, sometimes, immediately (generally around `250μs` after a 
+legitimate key-action) state-flips unexpectedly and holds in the ghost-state for `100-2500μs`. 
+It's not a rogue flip, the state is actually changed as if the switch is pressed (or released) for quite some time.  
+
+However much I tried, I could not get these ghosts out of my keyboard, I had to learn to live with them.  
+
+#### Debouncing
+
+Debouncing is a way to regulate signals (I think, this really isn't my field, don't roast me on the definitions), and 
+is a broad concept which can be applied to noisy signals in all kinds of areas.  
+
+I wanted to implement debouncing in a way that affected latency minimally, luckily this behaviour is only triggered 
+after legitimate key-actions, and on a per-key basis. IE. I only have to regulate keys after the first signal which I 
+know is good, and only for the same key that produced the good signal.  
+
+I record the last key-action and set up quarantine logic, it goes like this:
+
+> If a key has a delta shortly (implemented with a constant, 10_000 micros at writing) after the previous delta
+> require that that state is repeated for a short (same as above) time before producing a signal.
+
+My fastest repeated key-pressing of a single key is around `40_000μs` between presses, so this should not activate 
+on good presses. Furthermore, if it does and that state is held for long enough the key comes through anyway.  
+
+This worked like a charm, on a given keypress it should not increase latency at all, but it killed the noise.  

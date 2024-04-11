@@ -17,6 +17,7 @@ const LOCATIONS: &[LocationInfo] = &[
     LocationInfo::new("/threads.html", "Threads", "threads"),
     LocationInfo::new("/static-pie.html", "StaticPie", "static-pie"),
     LocationInfo::new("/kbd-smp.html", "KbdSmp", "kbd-smp"),
+    LocationInfo::new("/rust-kbd.html", "RustKbd", "rust-kbd"),
     LocationInfo::new("/test.html", "Test", "test"),
 ];
 
