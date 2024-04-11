@@ -563,3 +563,411 @@ My fastest repeated key-pressing of a single key is around `40_000μs` between p
 on good presses. Furthermore, if it does and that state is held for long enough the key comes through anyway.  
 
 This worked like a charm, on a given keypress it should not increase latency at all, but it killed the noise.  
+
+### Mysterious halting
+
+At some point of developing the keymap, the keyboard would start freezing on boot, not producing any output. 
+I couldn't understand why, but `core1`, which handles key-presses wouldn't report anything.
+
+I started removing the latest changes and realized that scanning 5 columns for changes but not 6 on the left side 
+would work fine. Adding back scanning 6 columns would freeze immediately again.  
+
+I took a break and when doing something else it suddenly struck me, here!
+
+```rust
+#[allow(static_mut_refs)]
+if let Err(_e) = mc.cores()[1].spawn(unsafe { &mut CORE_1_STACK_AREA }, move || {
+    run_core1(
+        receiver,
+        left_buttons,
+        timer,
+        #[cfg(feature = "hiddev")]
+        usb_bus,
+    )
+})
+```
+
+Can you see it?
+
+Well?
+
+The unsafe draws the attention, but I'm manually setting the stack area for core1:  
+
+`static mut CORE_1_STACK_AREA: [usize; 1024] = [0; 1024];`
+
+When adding the code for a 6th row, the stack overflows and the core halts, increasing the stack area 
+immediately solved the issue.
+
+## Performance
+
+Now the keyboard is actually usable, time for the fun part, performance. This is my first real embedded project, 
+and I learned a lot, programming for a different target.
+
+### Real time
+
+First off, since there's not much of a scheduler running (disregarding interrupts) the displayed scan rate on the 
+oleds gives very direct feedback on changes in performance, usually it's much more difficult to see how code-changes 
+impact performance, but here it's immediate and easy to spot.  
+
+### Priorities
+
+Measurement is the key to performance, and the measurements of interests are, in order, scan rate, key-processing-rate, 
+and binary size. Scan rate is important, because that determines the latency of key-press -> OS, 
+secondly, key-processing can't be too slow since that immediately tacks on to the latency, lastly there's a size restriction 
+of 2MB on the produced image. 
+
+### Methodology
+
+The oled displays scan rate, so that's easy. Key-processing-rate can't be measured as easily. However, jamming 
+the keyboard at max speed and checking the scan rate was used as a proxy. Binary size can be inspected on compilation.  
+
+## Inlining
+
+When people talk about performance [inlining](https://en.wikipedia.org/wiki/Inline_expansion) often comes up.
+
+Briefly, inlining is replacing a function call with the code from that function at the call-site, here's an example.
+
+```rust
+
+fn my_add(a: i32, b: i32) -> i32 {
+    a + b
+}
+
+fn not_inlined_caller() {
+    // Not inlined the function is called, moving 1, and 2 into the correct ABI-defined registers
+    // then invoking the function.
+    my_add(1, 2); 
+}
+
+fn inlined_caller_after_inlining() {
+    // my_add(1, 2) <- disappears
+    1 + 2 // <- my_add_function body copied into this function
+}
+```
+
+Inlining reduces some overhead, such as shuffling around values to registers, and invoking functions, 
+but all that copying of code can produce a lot of instructions, which may thrash the CPU's instruction cache. 
+
+Here's an example of how that could become problematic:
+
+```rust
+#[inline]
+fn my_very_long_fn() {
+    // 1000 lines of spooky code
+}
+
+fn my_caller(rarely_true: bool) {
+    if rarely_true {
+        my_very_long_fn();
+    }
+}
+```
+
+Depending on the CPU, it might, on entering `my_caller`, have to fetch all the instructions contained in `my_very_long_fn` 
+draining space in the instruction cache resulting in re-fetches which may take a long time. 
+If `rarely_true` is rarely true this could be an unnecessary overhead, and if the function is long enough, the 
+eventual savings from inlining may pale in comparison to the execution-time of the inlined function meaning that 
+there's no upside in the `rarely_true == true`-case, and huge downside in the `rarely_true == false`-case.
+
+It's hard however, to draw general conclusions, you have to measure to be sure, luckily I measured!
+
+### Inlining in practice
+
+There weren't huge surprises on where inlining made the most difference, but I was surprised with how much it mattered.
+
+The general logic of `core1` is this: 
+
+1. Check for changes (uart, gpio, usb).
+2. On a change, execute some logic (left side sends a keypress to the OS, right side sends it to the left).
+3. Report changes to `core0`.
+
+The vast majority of the time each loop produces no change, here's an excerpt from left side `core1`:
+
+```rust
+loop {
+    let mut any_change = false;
+    if let Some(update) = receiver.try_read() {
+        // Right side sent an update
+        rx += 1;
+        // Update report state
+        kbd.update_right(update, &mut report_state);
+        any_change = true;
+    }
+    // Check left side gpio and update report state
+    if kbd.scan_left(&mut left_buttons, &mut report_state, timer) {
+        any_change = true;
+    }
+    if any_change {
+        push_touch_to_admin();
+    }
+    #[cfg(feature = "hiddev")]
+    {
+        let mut pop = false;
+        if let Some(next_update) = report_state.report() {
+            // Published the next update on queue if present
+            unsafe {
+                pop = crate::runtime::shared::usb::try_push_report(next_update);
+            }
+        }
+        if pop {
+            // Remove the sent report (it's down here because of the borrow checker)
+            report_state.accept();
+        }
+    }
+
+    if let Some(change) = report_state.layer_update() {
+        push_layer_change(change);
+    }
+
+    if rx > 0 && push_rx_change(rx) {
+        rx = 0;
+    }
+    if loop_count.increment() {
+        let now = timer.get_counter();
+        let lc = loop_count.value(now);
+        if push_loop_to_admin(lc) {
+            loop_count.reset(now);
+        }
+    }
+}
+```
+
+Some of the code in that loop is only triggered in certain cases, I followed the philosophy of inlining most of what 
+always runs, and refusing to inline things that are conditionally called, Rust has facilities for this: 
+
+`#[inline]`, `#[inline(never)]`, and `#[inline(always)]`, the compiler is usually smart enough that it makes 
+the correct call if `#[inline]` is specified or not, so `#[inline(never)]`, and `#[inline(always)]` isn't that necessary.  
+
+[More information here](https://nnethercote.github.io/perf-book/inlining.html) on cross-crate stuff, but I'm compiling 
+with [fat-lto](https://doc.rust-lang.org/rustc/codegen-options/index.html) anyway, so it doesn't really matter to me here.
+
+The most impressive change was removing `#[inline]` from `kbd.update_right(update, &mut report_state);` inside the 
+if-statement above, that took the current scan latency from `80μs` to around `36μs`. Not inlining it halved the 
+scan latency.  
+
+Last notes on inlining, the compiler makes decisions about inlining that can be very hard to understand, you change 
+something random seemingly irrelevant, and suddenly the binary increases in size of 25% and latency increases by about 
+the same amount because the compiler decided to inline something that doesn't fit with your performance goals. 
+I want the scan-loop to be fast, but the compiler saw an opportunity to make something else fast at the expense of 
+the scan-loop, for example. It's not a *bad* decision, but it's a bad fit.  
+Making small changes and testing them is therefore important, and interesting!  
+
+## Const evaluation, bounds checking
+
+Fewer instructions are often better, fewer instructions are generally faster to execute than more instructions, 
+they take up less space in the instruction-cache, and may therefore make an inlining-tradeoff make more sense.  
+
+This `get_unchecked` which elides the bounds-check made a massive difference in performance. 
+
+```rust
+/// self.buffer[self.tail] -> unsafe {self.buffer.get_unchecked_mut(self.tail)};
+```
+
+It did it in two parts, it caused the compiler to inline the function, that in itself did a lot. 
+I manually marked it inline and reverted the change, and it still provided a several microsecond benefit. 
+Since I do bounds-checking elsewhere, I was confident keeping this `unsafe`.
+
+To further improve performance I wanted to evaluate as much as possible at compilation time, so that things are 
+accessed efficiently, if I can assert that indices are in bounds at comptime, I can safely use unsafe 
+access, Rust's type system provides tools for that. And since I know how many keys I have on my keyboard, 
+I don't have to have any dynamically sized arrays.  
+
+Here's an example: 
+
+```rust
+#[repr(transparent)]
+#[derive(Debug, Copy, Clone)]
+pub struct RowIndex(pub u8);
+
+impl RowIndex {
+    #[must_use]
+    #[allow(clippy::missing_panics_doc)]
+    pub const fn from_value(ind: u8) -> Self {
+        assert!(
+            ind < NUM_ROWS,
+            "Tried to construct row index from a bad value"
+        );
+        Self(ind)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+```
+
+The `RowIndex`-struct only accepts indices that are valid, therefore it's always safe to use to index into 
+structures with `NUM_ROWS` length or more.
+
+Using this strategy to elide bounds-checking shaved more microseconds off the loop-times. Since pin-indexing 
+is done on the `gpio` pin-scan on each loop, these improvements makes quite the difference.  
+
+## Macros to avoid branching
+
+I abhor macros, they're difficult to follow and understand, and professionally I try to avoid them like the plague. 
+But, here in my private life it's all about the performance, and they can be useful to avoid branching.
+
+Consider the connection of the actual GPIO-pin, and the struct that I use to keep a pin's state in memory.
+
+They have different types, all the GPIO-pins have different types, and all the keys as well, they can't be 
+kept in a collection together because they are different types. This, in my opinion, is fixable in `Rust`. 
+The reason that the buttons, for example, can't be kept together, is that each button may have a different memory layout.
+
+In my case they all have the same layout and all expose the same function, here's an example: 
+
+```rust
+impl KeyboardButton for LeftRow0Col0 {
+    fn on_press(&mut self, keyboard_report_state: &mut KeyboardReportState) {
+        keyboard_report_state.push_key(KeyCode::TAB);
+    }
+    fn on_release(
+        &mut self,
+        _last_press_state: LastPressState,
+        keyboard_report_state: &mut KeyboardReportState,
+    ) {
+        keyboard_report_state.pop_key(KeyCode::TAB);
+    }
+}
+```
+
+I generate the key-structs from a macro, they all have the exact same layout. 
+I should be able to store them in an array (assuming that the function addresses of each respective button's methods are knowable 
+which thinking about it they might now be).  
+
+Macros are a way around this though: 
+
+```rust
+macro_rules! impl_read_pin_col {
+    ($($structure: expr, $row: tt,)*, $col: tt) => {
+        paste! {
+            pub fn [<read_col _ $col _pins>]($([< $structure:snake >]: &mut $structure,)* left_buttons: &mut LeftButtons, keyboard_report_state: &mut KeyboardReportState, timer: Timer) -> bool {
+                // Safety: Make sure this is properly initialized and restored
+                // at the end of this function, makes a noticeable difference in performance
+                let col = unsafe {left_buttons.cols.$col.take().unwrap_unchecked()};
+                let col = col.into_push_pull_output_in_state(PinState::Low);
+                // Just pulling chibios defaults of 0.25 micros, could probably be 0
+                crate::timer::wait_nanos(timer, 250);
+                let mut any_change = false;
+                $(
+                    {
+                        if [< $structure:snake >].check_update_state(left_buttons.row_pin_is_low(rp2040_kbd_lib::matrix::RowIndex::from_value($row)), keyboard_report_state, timer) {
+                            any_change = true;
+                        }
+                    }
+
+                )*
+                left_buttons.cols.$col = Some(col.into_pull_up_input());
+                $(
+                    {
+                        while left_buttons.row_pin_is_low(rp2040_kbd_lib::matrix::RowIndex::from_value($row)) {}
+                    }
+                )*
+                any_change
+            }
+
+        }
+
+    };
+}
+```
+
+Here's how it's used: 
+```rust
+impl_read_pin_col!(
+    LeftRow0Col1, 0,
+    LeftRow1Col1, 1,
+    LeftRow2Col1, 2,
+    LeftRow3Col1, 3,
+    LeftRow4Col1, 4,
+    ,1
+); 
+// Produces function `read_col_1_pins` with proper typechecking
+let col1_change = read_col_1_pins(
+&mut self.left_row0_col1,
+&mut self.left_row1_col1,
+&mut self.left_row2_col1,
+&mut self.left_row3_col1,
+&mut self.left_row4_col1,
+left_buttons,
+keyboard_report_state,
+timer,
+);
+```
+
+In practice the macro code is inlined like this: 
+
+```rust 
+pub fn read_col_1_pins(left_row0_col1: &mut LeftRow0Col1, left_row1_col1: &mut LeftRow1Col1, left_row2_col1: &mut LeftRow2Col1, left_row3_col1: &mut LeftRow3Col1, left_row4_col1: &mut LeftRow4Col1, left_buttons: &mut LeftButtons, keyboard_report_state: &mut KeyboardReportState, timer: Timer) -> bool {
+    let col = unsafe {
+        left_buttons.cols.1
+            .take().unwrap_unchecked()
+    };
+    let col = col.into_push_pull_output_in_state(PinState::Low);
+
+    crate::timer::wait_nanos(timer, 250);
+    let mut any_change = false;
+    {
+        if left_row0_col1.check_update_state(left_buttons.row_pin_is_low(rp2040_kbd_lib::matrix::RowIndex::from_value(0)), keyboard_report_state, timer) {
+            any_change = true;
+        }
+    }
+    {
+        if left_row1_col1.check_update_state(left_buttons.row_pin_is_low(rp2040_kbd_lib::matrix::RowIndex::from_value(1)), keyboard_report_state, timer) {
+            any_change = true;
+        }
+    }
+    {
+        if left_row2_col1.check_update_state(left_buttons.row_pin_is_low(rp2040_kbd_lib::matrix::RowIndex::from_value(2)), keyboard_report_state, timer) {
+            any_change = true;
+        }
+    }
+    {
+        if left_row3_col1.check_update_state(left_buttons.row_pin_is_low(rp2040_kbd_lib::matrix::RowIndex::from_value(3)), keyboard_report_state, timer) {
+            any_change = true;
+        }
+    }
+    {
+        if left_row4_col1.check_update_state(left_buttons.row_pin_is_low(rp2040_kbd_lib::matrix::RowIndex::from_value(4)), keyboard_report_state, timer) {
+            any_change = true;
+        }
+    }
+    left_buttons.cols.1
+        = Some(col.into_pull_up_input());
+    {
+        while left_buttons.row_pin_is_low(rp2040_kbd_lib::matrix::RowIndex::from_value(0)) {}
+    }
+    {
+        while left_buttons.row_pin_is_low(rp2040_kbd_lib::matrix::RowIndex::from_value(1)) {}
+    }
+    {
+        while left_buttons.row_pin_is_low(rp2040_kbd_lib::matrix::RowIndex::from_value(2)) {}
+    }
+    {
+        while left_buttons.row_pin_is_low(rp2040_kbd_lib::matrix::RowIndex::from_value(3)) {}
+    }
+    {
+        while left_buttons.row_pin_is_low(rp2040_kbd_lib::matrix::RowIndex::from_value(4)) {}
+    }
+    any_change
+}
+```
+
+There is no access by index for the pins here, they are manually checked one-by-one. 
+
+## End
+
+This has been my longest writeup yet, it was my first real foray into embedded development and it ended with 
+me writing this on keyboard running my own firmware.
+
+There's still stuff to iron out with the keymap, but I'm really happy with the result.  
+
+The firmware is fast and works, the two things that I care about, the code can be found [here](https://github.com/MarcusGrass/rp2040-kbd).
+
+### Thoughts on QMK
+
+I went on a bit of a rant on QMK, but it's a great robust codebase, it could probably be reimplemented in Rust 
+if one really wanted to, but it seems unnecessary, and my firmware does not at all attempt to do it.  
+Mostly the macro-parts would need some thinking over, because the way I did keymaps were a real mess of boilerplate-code 
+that is not nice to work with.  
