@@ -1,8 +1,9 @@
-# QMK is a great project, building keyboard firmware in Rust
+# Building keyboard firmware in Rust, an embedded journey
 
 [Last time](/kbd-smp), I wrote about enabling Symmetric Multiprocessing on a keyboard using 
 [QMK](https://qmk.fm/) (and [Chibios](https://www.chibios.org/dokuwiki/doku.php)).  
-This was discovered to be a bad idea, as I was told by a maintainer, or at least the way I was doing it.  
+This was discovered to be a bad idea, as I was told by a maintainer, or at least the way I was doing it, QMK 
+is not made for multithreading (yet).
 
 My daughter sleeps a lot during the days, so I decided to step up the level of ambition a bit, 
 can keyboard firmware be reasonably written from "scratch" using Rust I asked myself, and found out that it can.
@@ -11,7 +12,7 @@ can keyboard firmware be reasonably written from "scratch" using Rust I asked my
 
 This writeup is about how I wrote multicore firmware using Rust for a [lily58 PCB](https://splitkb.com/products/aurora-lily58?variant=43553010090243), 
 and a [Liatris](https://splitkb.com/products/liatris?_pos=1&_sid=9363d742f&_ss=r) ([rp2040-based](https://www.raspberrypi.com/products/rp2040/))
-microcontroller.
+microcontroller. The code for it is [here](https://github.com/MarcusGrass/rp2040-kbd).  
 
 1. Callback to the last writeup
 2. Embedded on Rust
@@ -23,26 +24,12 @@ microcontroller.
 8. OLED displays
 9. BUUUUGS
 10. Performance
-11. Tying it together.
+11. Epilogue
 
-## Notes/Areas
-
-- Performance
-- Inlining / I-cache / Scan rate vs press/release for latency
-- Unsafe
-- Static mut refs
-- multicore
-- uart
-- gpio pins
-- stack overflow
-- jitter
-- Multiple keypresses
-- Reliability
-
-## On the last episode of 'Man wastes time reinventing the wheel'
+## On the last episode of 'Man wastes time reinventing wheel'
 
 Last time I did a pretty thorough dive into QMK, explaining keyboard basics, and most of the jargon used.  
-I'm not going to be as thorough this time, but briefly.
+I'm not going to be as thorough this time, but briefly:
 
 ### Enthusiast keyboards
 
@@ -50,9 +37,10 @@ There are communities building enthusiast keyboards, often soldering components 
 own firmware to fit their needs (or wants). 
 
 Generally, a keyboard consists of the PCB, microcontroller (sometimes integrated), switches that go on the PCB, 
-and keycaps that go on the switches. Split keyboards are also fairly popular, those keyboards have two separate PCBs 
-that are connected to each other by wire, I've been using an [iris](https://keeb.io/collections/iris-split-ergonomic-keyboard) 
-for a long time. There are also peripherals, such as [rotary encoders](https://keeb.io/products/rotary-encoder-ec11?_pos=1&_sid=0becfc852&_ss=r), 
+and keycaps that go on the switches. Split keyboards are also fairly popular, those keyboards generally have two separate PCBs 
+that are connected to each other by wire, I've been using the split keyboard
+[iris](https://keeb.io/collections/iris-split-ergonomic-keyboard)for a long time. 
+There are also peripherals, such as [rotary encoders](https://keeb.io/products/rotary-encoder-ec11?_pos=1&_sid=0becfc852&_ss=r), 
 [oled](https://en.wikipedia.org/wiki/OLED) displays, sound emitters, RGB lights and much more that can be integrated 
 with the keyboard. Pretty much any peripheral that the microcontroller can interface with is a possible add-on to 
 a user's keyboard.
@@ -60,15 +48,16 @@ a user's keyboard.
 
 #### QMK
 
-To get the firmware together an open source firmware repo called QMK can be used, there are a few others but to my 
+To get the firmware together, an open source firmware repo called QMK can be used. There are a few others but to my 
 knowledge QMK is the most popular and mature alternative. You can make a keymap without writing any code at all, 
 but if you want to interface with peripherals, or execute advanced logic, some C-code will be necessary.  
 
 
 ### Back to last time
 
-I bought a microcontroller with has dual cores, and I wanted to use them to offload oled-drawing to a second core, 
-and did a deep dive into enabling that for my setup. While it worked it was not thread-safe, and generally discouraged.
+I bought a microcontroller which has dual cores, and I wanted to use them to offload oled-drawing to the core that 
+doesn't handle latency-sensitive activities, and did a deep dive into enabling that for my setup. 
+While it worked it was not thread-safe, and generally discouraged.
 
 That's when I decided to write my own firmware in Rust.
 
@@ -77,10 +66,10 @@ That's when I decided to write my own firmware in Rust.
 I hadn't written for embedded targets before my last foray into keyboard firmware, I had some tangential experience 
 with the [heapless](https://github.com/rust-embedded/heapless) library which exposes stack-allocated collections.
 These can be useful for performance in some cases, but very useful if you haven't got a heap at all, like you 
-sometimes will not have on embedded devices.  
+often will not have on embedded devices.  
 
 I searched for rp2040 Rust and found [rp-hal](https://github.com/rp-rs/rp-hal), hal stands for Hardware 
-Abstraction Layer, and the crate exposes high-level code to interface with the low-level processor functionality.  
+Abstraction Layer, and the crate exposes high-level code to interface with low-level processor and peripheral functionality.  
 
 For example, spawning a task on the second core, resetting to bootloader, reading [GPIO](https://en.wikipedia.org/wiki/General-purpose_input/output)
 pins, and more. This was a good starting point, when I found this project I had already soldered together 
@@ -90,15 +79,15 @@ the keyboard.
 
 rp-hal provides access to the basic CPU-functionality, but that CPU is mounted on a board in itself, which has 
 peripherals, in this case it's the [Liatris](https://splitkb.com/products/liatris), the mapping of the outputs 
-of the board to code can be done in the [rp-hal-boards](https://github.com/rp-rs/rp-hal-boards) crate and is called 
-a Board support package (BSP), 
-so that they can be shared. I haven't made a PR for [my fork yet](https://github.com/marcusgrass/rp-hal-boards), 
+of the board to code is called a Board support package (BSP), and can be put in the 
+[rp-hal-boards](https://github.com/rp-rs/rp-hal-boards) repo so that they can be shared. 
+I haven't made a PR for [my fork yet](https://github.com/marcusgrass/rp-hal-boards), 
 I'm planning to do it when I've worked out all remaining bugs in my code, but it's very much based on the
 [rp-pico BSP](https://github.com/rp-rs/rp-hal-boards/tree/main/boards/rp-pico).  
 
 ## Starting development
 
-Now I wanted to get any firmware running just to see that it's working well.
+Now I wanted to get any firmware running just to see that it's working.
 
 ### USB serial
 
@@ -106,11 +95,12 @@ The Liatris MCU has an integrated USB-port, I figured that the easiest way to se
 at all was to implement some basic communication over that port, until I can get some information out of the MCU 
 I'm flying completely blind.  
 
-The rp-pico BSP examples were excellent, using them I could set up a serial interface which just echoed back what 
-was written to it to the OS.
+The [rp-pico BSP examples](https://github.com/rp-rs/rp-hal-boards/blob/main/boards/rp-pico/examples/pico_usb_serial.rs) 
+were excellent, using them I could set up a serial interface which just echoed back what was written to it to the OS.
 
-Hooking the serial interface up to the OS was another matter though. I compile the firmware and 
-flash it to the keyboard by holding down the onboard boot-button and pressing reset.
+Hooking the serial interface up to the OS was another matter though. I compiled the firmware and 
+flashed it to the keyboard by holding down the onboard boot-button and pressing reset, then went to 
+figure out the OS parts.  
 
 #### USB CDC ACM
 
@@ -128,7 +118,7 @@ No response.
 
 I do some more searching and find out that two-way communication with serial devices over the CDC-ACM-driver 
 isn't as easy as echoing and `cat`ing a file. [minicom](https://linux.die.net/man/1/minicom) is a program 
-that can interface with this kind of device, but the UX was extremely obtuse, looking for alternatives I found 
+that can interface with this kind of device, but the UX was obtuse, looking for alternatives I found 
 [picocom](https://linux.die.net/man/8/picocom) which serves the same purpose but is slightly nicer to use:
 
 ```bash
@@ -182,11 +172,11 @@ onto it, this made iterating much faster.
 
 There are [schematics for the pcb](https://docs.splitkb.com/hc/en-us/articles/6942088875292-Aurora-Lily58-schematics) 
 online, as well as a [schematic of the pinout of the elite-c MCU](https://docs.splitkb.com/hc/en-us/articles/6485704310044-Elite-Pi-Technical-data), 
-which the developers told me were the same as for the Liatris.  
+which the developers told me were the same as for the Liatris, this seems to be true.  
 
 Rows and columns are connected to GPIO-pins in the MCU, switches connect rows and columns, if switches are pressed a current can flow between them. 
-My first thought was that if a switch that sits between row0 and col0 is pressed, the pin for row0 and col0 would read 
-high (or low), that's not the case.
+My first thought was that if a switch that sits between `row0` and `col0` is pressed, the pin for `row0` and `col0` would read 
+`high` (or `low`), that's not the case.
 
 ### PullUp and PullDown resistors
 
@@ -196,41 +186,41 @@ there's a resistor connected to power or ground, up or down respectively.
 
 That made some sense to me, I figure either the rows or columns should be PullUp while the other is PullDown. 
 This did not produce any reasonable results either. 
-At this point, I had written some debug-code which scanned all GPIO-pins and printed if their state changed, while 
-I was pressing keyboard buttons.  
+At this point, I had written some debug-code which scanned all GPIO-pins and printed if their state changed, and 
+I was mashing keyboard buttons.  
 
 I was getting frustrated with non-progress and decided to look into QMK, there's a lot of `__weak__`-linkage, 
 the [abstract class of C](https://en.wikipedia.org/wiki/Weak_symbol), so actually following the code in QMK 
 can be difficult, which is why I hadn't browsed it in more depth earlier.  
 
-But I did find the problem. All pins, rows and columns, should be pulled high (PullUp), 
-then the column that should be checked is set low, and all rows are checked, if any row goes low then the switch 
+But I did find the problem. All pins, rows and columns, should be pulled `high` (PullUp), 
+then the column that should be checked is set `low`, and all rows are checked, if any row goes `low` then the switch 
 connecting the checked column and that row is being pressed. In other words:
 
-Set `col0` to low, if `row0` is still high, switch `0, 0` top-left for example, is not pressed.
-If `row1` is now low switch `1, 0`, first key on the second row, is being pressed.  
+Set `col0` to `low`, if `row0` is still `high`, switch `0, 0` top-left for example, is not pressed.
+If `row1` is now `low`, it means that switch `1, 0`, first key on the second row, is being pressed.  
 
 Now I can detect which keys are being pressed, useful functionality for a keyboard.  
 
 ### Split keyboards
 
 Looking back at the [schematic](https://docs.splitkb.com/hc/en-us/article_attachments/8356613654940) I see that there's a pin
-labeled side-indicator, that either goes to ground or voltage. After a brief check it reads, as expected, high on the left
-side, and low on the right side.
+labeled side-indicator, that either goes to ground or voltage. After a brief check it reads, as expected, `high` on the left
+side, and `low` on the right side.
 
 Now that I can detect which keys are being pressed, by coordinates, and which side is being run,
 it's time to transmit key-presses from the right-side to the left. 
 
 The reason to do it that way is that the left is the side that I'm planning on connecting to the computer with a 
 usb-cable. Now, I could have written to code to be side-agnostic, checking whether a USB-cable is connected and choosing 
-whether to send key-presses over the wire connecting the sides, or the USB-cable. But, that approach both increases 
-complexity and binary size, so I opted not to.  
+whether to send key-presses over the wire connecting the sides, or the USB-cable. However, that approach both increases 
+complexity and binary size so I opted not to.  
 
 #### Bits over serial
 
 Looking at the schematics again, I see that one pin is labeled `DATA`, that pin is the one connected to the 
 pad that the [TRRS cable](https://splitkb.com/products/coiled-angled-trrs-cable) connects the sides with.  
-However, there is only one pin on each side, which means that all communication is limited to high/low on a single 
+However, there is only one pin on each side, which means that all communication is limited to `high`/`low` on a single 
 pin. Transfer is therefore limited to one bit at a time.
 
 Looking over the default configuration for my keyboard in QMK the [BitBang](https://github.com/qmk/qmk_firmware/blob/master/docs/serial_driver.md) 
@@ -279,10 +269,12 @@ In the protocol, the first 5 bits gives the matrix-index of the key that changed
 that key was pressed or released, the 7th bit indicates whether the rotary-encoder has a change, and the 8th 
 bit indicates whether that change was clock- or counter-clockwise.  
 
-For better or worse, all byte-values are valid, although some may represent keys that do not exist, since there are 
+For better or worse, almost all bit-patterns are valid, some may represent keys that do not exist, since there are 
 28 keys, but 32 slots for the 5 bits indicating the matrix-index.  
 
 I used the [bitvec](https://docs.rs/bitvec/latest/bitvec/) crate for bit-manipulation, that library is excellent.  
+I warmly recommend it, even though I went with a more custom solution for performance reasons (I made some 
+specific optimizations to my use-case, see 'Performance').  
 
 ## Keymap
 
@@ -442,6 +434,7 @@ Almost immediately when trying to type I discovered that keys would be repeated,
 ### Spooky electrons, debounce!
 
 I looked into QMK once more, since my keyboard with QMK firmware doesn't have issues (IE not a hardware problem).  
+All excepts of C below are from [QMK](https://github.com/qmk/qmk_firmware), [license here](https://github.com/qmk/qmk_firmware/blob/master/license_GPLv3.md).  
 
 Here's the function that reads pins: 
 
@@ -477,7 +470,7 @@ __attribute__((weak)) void matrix_read_rows_on_col(matrix_row_t current_matrix[]
 
 I had looked at it previously, but disregarded those delays (`matrix_output_select_delay()` and 
 `matrix_output_unselect_delay(current_col, key_pressed); // wait for all Row signals to go HIGH`), because 
-we're trying to be speedy here. Thread.sleep() isn't speedy, everyone knows that.  
+we're trying to be speedy here. `Thread.sleep()` isn't speedy, everyone knows that.  
 
 However, it turns out that they are important. Again I have to follow weak functions, a nightmare: 
 
@@ -487,7 +480,7 @@ __attribute__((weak)) void matrix_output_select_delay(void) {
     waitInputPinDelay();
 }
 
--> 
+// Found implementation in -> 
 
 /// platform/chibios/_wait.h
 #ifndef GPIO_INPUT_PIN_DELAY
@@ -508,19 +501,19 @@ I implement it, and it changes nothing. On to the next!
 __attribute__((weak)) void matrix_output_unselect_delay(uint8_t line, bool key_pressed) {
     matrix_io_delay();
 }
-
+/// quantum/matrix_common.c
 /* `matrix_io_delay ()` exists for backwards compatibility. From now on, use matrix_output_unselect_delay(). */
 __attribute__((weak)) void matrix_io_delay(void) {
     wait_us(MATRIX_IO_DELAY);
 }
-
+// quantum/matrix_common.c
 #ifndef MATRIX_IO_DELAY
 #    define MATRIX_IO_DELAY 30
 #endif
 ```
 
 for all of the above symbols, I need to check that it's not specifically overridden by my keyboard implementation, 
-none were `matrix_output_unselect_delay(current_col, key_pressed)` therefore waits `30μs`. 
+none were. `matrix_output_unselect_delay(current_col, key_pressed)` therefore waits `30μs`. 
 
 I add the delay and the number of t's go from 19 to sometimes *many*, good not great. But, my scan-rate which is directly influencing 
 latency on presses goes from around `40μs` to `200μs+` (6 columns, each with a `30μs` sleep), unacceptable. The above code did come with a comment, 
@@ -533,7 +526,7 @@ for row in rows {
 }
 ```
 
-Now latency lands around `50μs`. I still have that issue of the many t's, but at least it didn't get worse.
+Now latency lands around `50μs`. I still have that issue of the many t's, but at least the problem didn't get worse.
 
 I hook up the keyboard to `picocom` and start reading output lines.  
 I output each state-delta as `M0, R0, C0 -> true [90237]`, matrix index, row_index, column index, and whether the key
@@ -556,8 +549,8 @@ know is good, and only for the same key that produced the good signal.
 
 I record the last key-action and set up quarantine logic, it goes like this:
 
-> If a key has a delta shortly (implemented with a constant, 10_000 micros at writing) after the previous delta
-> require that that state is repeated for a short (same as above) time before producing a signal.
+> If a key has a delta shortly (implemented with a constant, 10_000 micros at writing) after the previous delta,
+> require that the new state is repeated for a short (same as above) time before producing a signal.
 
 My fastest repeated key-pressing of a single key is around `40_000μs` between presses, so this should not activate 
 on good presses. Furthermore, if it does and that state is held for long enough the key comes through anyway.  
@@ -601,7 +594,7 @@ immediately solved the issue.
 ## Performance
 
 Now the keyboard is actually usable, time for the fun part, performance. This is my first real embedded project, 
-and I learned a lot, programming for a different target.
+and I learned a lot programming for a different target.
 
 ### Real time
 
@@ -641,7 +634,7 @@ fn not_inlined_caller() {
 
 fn inlined_caller_after_inlining() {
     // my_add(1, 2) <- disappears
-    1 + 2 // <- my_add_function body copied into this function
+    1 + 2 // <- `my_add` function body copied into this function
 }
 ```
 
@@ -669,7 +662,7 @@ If `rarely_true` is rarely true this could be an unnecessary overhead, and if th
 eventual savings from inlining may pale in comparison to the execution-time of the inlined function meaning that 
 there's no upside in the `rarely_true == true`-case, and huge downside in the `rarely_true == false`-case.
 
-It's hard however, to draw general conclusions, you have to measure to be sure, luckily I measured!
+It's hard to draw general conclusions however, you have to measure to be sure, luckily I measured!
 
 ### Inlining in practice
 
@@ -704,7 +697,7 @@ loop {
     {
         let mut pop = false;
         if let Some(next_update) = report_state.report() {
-            // Published the next update on queue if present
+            // Publish the next update on queue if present
             unsafe {
                 pop = crate::runtime::shared::usb::try_push_report(next_update);
             }
@@ -736,7 +729,7 @@ Some of the code in that loop is only triggered in certain cases, I followed the
 always runs, and refusing to inline things that are conditionally called, Rust has facilities for this: 
 
 `#[inline]`, `#[inline(never)]`, and `#[inline(always)]`, the compiler is usually smart enough that it makes 
-the correct call if `#[inline]` is specified or not, so `#[inline(never)]`, and `#[inline(always)]` isn't that necessary.  
+the correct call if `#[inline]` is specified or not, so `#[inline(never)]`, and `#[inline(always)]` aren't that necessary.  
 
 [More information here](https://nnethercote.github.io/perf-book/inlining.html) on cross-crate stuff, but I'm compiling 
 with [fat-lto](https://doc.rust-lang.org/rustc/codegen-options/index.html) anyway, so it doesn't really matter to me here.
@@ -746,7 +739,7 @@ if-statement above, that took the current scan latency from `80μs` to around `3
 scan latency.  
 
 Last notes on inlining, the compiler makes decisions about inlining that can be very hard to understand, you change 
-something random seemingly irrelevant, and suddenly the binary increases in size of 25% and latency increases by about 
+something seemingly irrelevant, and suddenly the binary increases in size by 25% and latency increases by about 
 the same amount because the compiler decided to inline something that doesn't fit with your performance goals. 
 I want the scan-loop to be fast, but the compiler saw an opportunity to make something else fast at the expense of 
 the scan-loop, for example. It's not a *bad* decision, but it's a bad fit.  
@@ -769,7 +762,7 @@ Since I do bounds-checking elsewhere, I was confident keeping this `unsafe`.
 
 To further improve performance I wanted to evaluate as much as possible at compilation time, so that things are 
 accessed efficiently, if I can assert that indices are in bounds at comptime, I can safely use unsafe 
-access, Rust's type system provides tools for that. And since I know how many keys I have on my keyboard, 
+index accesses. Rust's type system provides tools for that, and since I know how many keys I have on my keyboard, 
 I don't have to have any dynamically sized arrays.  
 
 Here's an example: 
@@ -812,7 +805,7 @@ But, here in my private life it's all about the performance, and they can be use
 Consider the connection of the actual GPIO-pin, and the struct that I use to keep a pin's state in memory.
 
 They have different types, all the GPIO-pins have different types, and all the keys as well, they can't be 
-kept in a collection together because they are different types. This, in my opinion, is fixable in `Rust`. 
+kept in a collection together without using a [v-table](https://doc.rust-lang.org/std/keyword.dyn.html). This, in my opinion, is fixable in `Rust`. 
 The reason that the buttons, for example, can't be kept together, is that each button may have a different memory layout.
 
 In my case they all have the same layout and all expose the same function, here's an example: 
@@ -834,7 +827,7 @@ impl KeyboardButton for LeftRow0Col0 {
 
 I generate the key-structs from a macro, they all have the exact same layout. 
 I should be able to store them in an array (assuming that the function addresses of each respective button's methods are knowable 
-which thinking about it they might now be).  
+which thinking about it they might not be).  
 
 Macros are a way around this though: 
 
@@ -885,14 +878,14 @@ impl_read_pin_col!(
 ); 
 // Produces function `read_col_1_pins` with proper typechecking
 let col1_change = read_col_1_pins(
-&mut self.left_row0_col1,
-&mut self.left_row1_col1,
-&mut self.left_row2_col1,
-&mut self.left_row3_col1,
-&mut self.left_row4_col1,
-left_buttons,
-keyboard_report_state,
-timer,
+    &mut self.left_row0_col1,
+    &mut self.left_row1_col1,
+    &mut self.left_row2_col1,
+    &mut self.left_row3_col1,
+    &mut self.left_row4_col1,
+    left_buttons,
+    keyboard_report_state,
+    timer,
 );
 ```
 
@@ -958,11 +951,10 @@ There is no access by index for the pins here, they are manually checked one-by-
 
 ## End
 
-This has been my longest writeup yet, it was my first real foray into embedded development and it ended with 
-me writing this on keyboard running my own firmware.
+This has been my longest writeup yet, it was my first real foray into embedded development, and it ended with 
+me writing this on a keyboard running my own firmware.
 
 There's still stuff to iron out with the keymap, but I'm really happy with the result.  
-
 The firmware is fast and works, the two things that I care about, the code can be found [here](https://github.com/MarcusGrass/rp2040-kbd).
 
 ### Thoughts on QMK
