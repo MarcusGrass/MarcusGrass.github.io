@@ -827,7 +827,7 @@ impl KeyboardButton for LeftRow0Col0 {
 
 I generate the key-structs from a macro, they all have the exact same layout. 
 I should be able to store them in an array (assuming that the function addresses of each respective button's methods are knowable 
-which thinking about it they might not be).  
+which thinking about it, they might not be).  
 
 Macros are a way around this though: 
 
@@ -948,6 +948,56 @@ pub fn read_col_1_pins(left_row0_col1: &mut LeftRow0Col1, left_row1_col1: &mut L
 ```
 
 There is no access by index for the pins here, they are manually checked one-by-one. 
+
+### Performance summary
+
+In the end I took 4 measurements on the left side: 
+
+1. Scan latency
+2. Change originating from left scan loop latency
+3. Change originating from right scan loop latency
+4. Inter-core message queue capacity
+
+And 3 on the right:
+
+1. Scan latency
+2. Change loop latency
+3. Inter-core message queue capacity
+
+The scan latency has been talked about, it ended up at about `20μs` after optimizations, 
+that is, each pin is checked every `20μs` if the keyboard is idle (on both sides).
+
+Changes originating from the left measures the loop latency, the time it takes before discovering a change 
+to completely processing it, when a change comes from the left side gpio pins. That landed on about 
+`60μs`. In other words, from starting to check for changes, to discovering and handling a change is 
+`60μs`.
+
+Changes originating from the right measures the same as above but from the right side, that takes about 
+`70μs`.
+
+Inter-core message queue capacity sits firmly at 0 on both sides, even though the consumer-core writes messages to oled, 
+it doesn't get overwhelmed. 
+
+On the right-side the latency on changes is only `25μs` however, since the 
+left side handles all the logic contained in the keymap, this makes sense.  
+
+#### Rough calculation of worst case latency
+
+This means that the keyboard *should* at most add a `70μs` latency overhead from the left, and `25μs` on the right, 
+and be able to detect a change lasting for `20μs` or more on both sides.
+
+The transfer rate between sides is set by the uart baud-rate which is `781 250` bits per second.  
+This calculates to `10.24μs` per byte sent, all messages sent are at most `1` byte.  
+
+Worst case scenario *should* therefore be the `os_poll_latency + left_side_right_change_latency + right_side_latency + transfer_latency`,
+which would be `1000μs + 70μs + 25μs + 10μs = 1105μs`, when a single key is pressed on the right side,`os_poll_latency + left_side_left_change_latency = 1060μs` on the left. 
+
+#### Caveat
+
+This only holds for single presses, if the keymap outputs sequences like when I press `^`, on eu keyboards 
+that needs a second press to activate, so that you can send symbols like `â`. However, I don't do that, I want `^` 
+to go out immediately so when `^` is pressed, I send KeyDown `^` + KeyUp `^` + KeyDown `^` 
+which makes the os-latency alone be `3000μs`.  
 
 ## End
 
