@@ -5,8 +5,8 @@
 This was discovered to be a bad idea, as I was told by a maintainer, or at least the way I was doing it, QMK 
 is not made for multithreading (yet).
 
-My daughter sleeps a lot during the days, so I decided to step up the level of ambition a bit, 
-can keyboard firmware be reasonably written from "scratch" using Rust I asked myself, and found out that it can.
+My daughter sleeps a lot during the days, so I decided to step up the level of ambition a bit: 
+Can keyboard firmware be reasonably written from "scratch" using Rust, I asked myself, and found out that it can.
 
 ## Overview
 
@@ -36,12 +36,12 @@ I'm not going to be as thorough this time, but briefly:
 There are communities building enthusiast keyboards, often soldering components together themselves, and tailoring their 
 own firmware to fit their needs (or wants). 
 
-Generally, a keyboard consists of the PCB, microcontroller (sometimes integrated), switches that go on the PCB, 
+Generally, a keyboard consists of the PCB, microcontroller (sometimes integrated with the PCB), switches that go on the PCB, 
 and keycaps that go on the switches. Split keyboards are also fairly popular, those keyboards generally have two separate PCBs 
 that are connected to each other by wire, I've been using the split keyboard
-[iris](https://keeb.io/collections/iris-split-ergonomic-keyboard)for a long time. 
+[iris](https://keeb.io/collections/iris-split-ergonomic-keyboard) for a long time. 
 There are also peripherals, such as [rotary encoders](https://keeb.io/products/rotary-encoder-ec11?_pos=1&_sid=0becfc852&_ss=r), 
-[oled](https://en.wikipedia.org/wiki/OLED) displays, sound emitters, RGB lights and much more that can be integrated 
+[oled](https://en.wikipedia.org/wiki/OLED) displays, sound emitters, RGB lights and many more that can be integrated 
 with the keyboard. Pretty much any peripheral that the microcontroller can interface with is a possible add-on to 
 a user's keyboard.
 
@@ -57,13 +57,13 @@ but if you want to interface with peripherals, or execute advanced logic, some C
 
 I bought a microcontroller which has dual cores, and I wanted to use them to offload oled-drawing to the core that 
 doesn't handle latency-sensitive activities, and did a deep dive into enabling that for my setup. 
-While it worked it was not thread-safe, and generally discouraged.
+While it worked it was not thread-safe and generally discouraged by the maintainers.
 
 That's when I decided to write my own firmware in Rust.
 
 ## Embedded on Rust
 
-I hadn't written for embedded targets before my last foray into keyboard firmware, I had some tangential experience 
+I hadn't written code for embedded targets before my last foray into keyboard firmware, I had some tangential experience 
 with the [heapless](https://github.com/rust-embedded/heapless) library which exposes stack-allocated collections.
 These can be useful for performance in some cases, but very useful if you haven't got a heap at all, like you 
 often will not have on embedded devices.  
@@ -73,7 +73,7 @@ Abstraction Layer, and the crate exposes high-level code to interface with low-l
 
 For example, spawning a task on the second core, resetting to bootloader, reading [GPIO](https://en.wikipedia.org/wiki/General-purpose_input/output)
 pins, and more. This was a good starting point, when I found this project I had already soldered together 
-the keyboard. 
+the keyboard and was ready to write firmware for it. 
 
 ### CPU and board
 
@@ -111,9 +111,11 @@ USB CDC ACM, USB and two meaningless letter combinations. Together they stand fo
 
 When the correct drivers are installed, and the keyboard plugged in, [dmesg](https://man7.org/linux/man-pages/man1/dmesg.1.html) 
 tells me that there's a new device under `/dev/ttyACM0`. 
+
 ```bash
 echo "Hello!" >> /dev/ttyACM0
 ```
+
 No response.
 
 I do some more searching and find out that two-way communication with serial devices over the CDC-ACM-driver 
@@ -166,7 +168,9 @@ if last_chars.ends_with(b"boot") {
 ```
 
 Great, now I can connect to the device and type boot, and it'll boot into flash-mode so that I can load new firmware 
-onto it, this made iterating much faster.
+onto it, this made iterating much faster. Since everything was soldered and mounted, I had to use a (wooden) skewer 
+to reach under the oled and press the boot button on the microcontroller before this. I recommend not soldering on 
+components blocking access to the boot-button if doing this kind of programming.  
 
 ## Developing actual keyboard functionality
 
@@ -187,14 +191,14 @@ there's a resistor connected to power or ground, up or down respectively.
 That made some sense to me, I figure either the rows or columns should be PullUp while the other is PullDown. 
 This did not produce any reasonable results either. 
 At this point, I had written some debug-code which scanned all GPIO-pins and printed if their state changed, and 
-I was mashing keyboard buttons.  
+I was mashing keyboard buttons with strange output as a result.  
 
 I was getting frustrated with non-progress and decided to look into QMK, there's a lot of `__weak__`-linkage, 
 the [abstract class of C](https://en.wikipedia.org/wiki/Weak_symbol), so actually following the code in QMK 
 can be difficult, which is why I hadn't browsed it in more depth earlier.  
 
 But I did find the problem. All pins, rows and columns, should be pulled `high` (PullUp), 
-then the column that should be checked is set `low`, and all rows are checked, if any row goes `low` then the switch 
+then the column that should be checked is set `low`, and then all rows are checked, if any row goes `low` then the switch 
 connecting the checked column and that row is being pressed. In other words:
 
 Set `col0` to `low`, if `row0` is still `high`, switch `0, 0` top-left for example, is not pressed.
@@ -214,14 +218,20 @@ it's time to transmit key-presses from the right-side to the left.
 The reason to do it that way is that the left is the side that I'm planning on connecting to the computer with a 
 usb-cable. Now, I could have written to code to be side-agnostic, checking whether a USB-cable is connected and choosing 
 whether to send key-presses over the wire connecting the sides, or the USB-cable. However, that approach both increases 
-complexity and binary size so I opted not to.  
+complexity and binary size, so I opted not to.  
+
+#### Stupid note
+
+I could also have made each side a separate independent keyboard, which would have been pretty fun, but problematic 
+for a lot of reasons, like using left shift pressing a right-key, I'd have to have software on the computer to patch them 
+together.
 
 #### Bits over serial
 
 Looking at the schematics again, I see that one pin is labeled `DATA`, that pin is the one connected to the 
 pad that the [TRRS cable](https://splitkb.com/products/coiled-angled-trrs-cable) connects the sides with.  
-However, there is only one pin on each side, which means that all communication is limited to `high`/`low` on a single 
-pin. Transfer is therefore limited to one bit at a time.
+However, there is only one pin on each side, which means that all communication is limited to setting/reading 
+`high`/`low` on a single pin. Transfer is therefore limited to one bit at a time.
 
 Looking over the default configuration for my keyboard in QMK the [BitBang](https://github.com/qmk/qmk_firmware/blob/master/docs/serial_driver.md) 
 driver is used since nothing else is specified, there are also USART, single- and full-duplex available.  
@@ -233,7 +243,7 @@ Receiver-Transmitter, and is a protocol (although the wiki says a peripheral dev
 to send bits over a wire.  
 
 There is a UART-implementation for the rp2040, in the [rp-hal-crate](https://github.com/rp-rs/rp-hal), but it 
-assumes usage of the builtin uart-peripheral, that uses both an RX and TX-pin in a set position, in my case 
+assumes usage of the builtin uart-peripheral, that uses both an RX and TX-pin in a pre-defined set position, in my case 
 I want to either have half-duplex communication (one side communicates at a time), or simplex communication from right
 to left. That means that the `DATA`-pin on the left side should be UART-RX (receiver) while the `DATA`-pin on 
 the right is UART-TX (transmitter).  
@@ -272,7 +282,8 @@ bit indicates whether that change was clock- or counter-clockwise.
 For better or worse, almost all bit-patterns are valid, some may represent keys that do not exist, since there are 
 28 keys, but 32 slots for the 5 bits indicating the matrix-index.  
 
-I used the [bitvec](https://docs.rs/bitvec/latest/bitvec/) crate for bit-manipulation, that library is excellent.  
+I used the [bitvec](https://docs.rs/bitvec/latest/bitvec/) crate for bit-manipulation when prototyping, 
+that library is excellent.  
 I warmly recommend it, even though I went with a more custom solution for performance reasons (I made some 
 specific optimizations to my use-case, see 'Performance').  
 
@@ -331,10 +342,10 @@ unsafe fn USBCTRL_IRQ() {
 }
 ```
 
-#### Oh right Interrupts
+#### Oh right, interrupts
 
 [Interrupts](https://en.wikipedia.org/wiki/Interrupt) are ways for the processor to interrupt current executing code 
-and executing something else, they are similar to [Linux signal handlers](https://man7.org/linux/man-pages/man7/signal.7.html).
+and executing something else, interrupt handlers are similar to [Linux signal handlers](https://man7.org/linux/man-pages/man7/signal.7.html).
 
 In this specific case, the USB-peripheral generates an interrupt when polled, the core that registered an interrupt 
 handler for that specific interrupt (`USBCTRL_IRQ`) will pause current execution and run the code contained in 
@@ -387,7 +398,7 @@ I still haven't quite figured out why since I'm not overflowing the buffer, digg
 understand much either, but it was pretty opaque.  
 
 I settled for pushing at most one keyboard report per poll, that means at most one per ms. 
-This means a worst case latency of 1ms on a key-action assuming there's no backup, I keep eventual unpublishable 
+This means a worst case latency of 1ms on a key-action assuming there's no queue-backup, I keep eventual unpublishable 
 reports in a queue that's drained 1 entry per poll. Again, there may be something written in the specifications 
 about this, but it's good enough for now.
 
@@ -423,7 +434,7 @@ When displayed it looks like this:
 Setting it up was pretty trivial, there's a library for [SSD1306 oleds](https://docs.rs/ssd1306/latest/ssd1306/) 
 which works great!
 
-Now I have a keyboard that can submit keypresses to the OS, and display some debug information on it's oleds, 
+Now I have a keyboard that can submit key-presses to the OS, and display some debug information on its oleds, 
 time to get into the bugs.  
 
 ## BUUUUUUUGS
@@ -560,7 +571,8 @@ This worked like a charm, on a given keypress it should not increase latency at 
 ### Mysterious halting
 
 At some point of developing the keymap, the keyboard would start freezing on boot, not producing any output. 
-I couldn't understand why, but `core1`, which handles key-presses wouldn't report anything.
+I couldn't understand why, but `core1`, which handles key-presses wouldn't report anything. Once more I had to 
+get the dedicated boot-skewer out to flash new firmware.  
 
 I started removing the latest changes and realized that scanning 5 columns for changes but not 6 on the left side 
 would work fine. Adding back scanning 6 columns would freeze immediately again.  
