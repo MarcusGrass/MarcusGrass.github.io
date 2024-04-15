@@ -402,6 +402,13 @@ This means a worst case latency of 1ms on a key-action assuming there's no queue
 reports in a queue that's drained 1 entry per poll. Again, there may be something written in the specifications 
 about this, but it's good enough for now.
 
+#### Follow-up
+
+I did try to find more information about the USB HID protocol but was unable to. 
+I also tried to figure out how to do [keyrollover, specifically NKRO](https://en.wikipedia.org/wiki/Key_rollover) 
+but could not figure out how to have more registered keys than the `keyboard_report`-struct 
+can fit (6), so the keyboard is `6KRO`, which Is fine by me.
+
 ## Oled displays
 
 One of the motivators for using multiple cores were the ability to render to oled on-demand with low latency.  
