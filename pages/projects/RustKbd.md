@@ -266,10 +266,31 @@ You could probably make a single-pin half-duplex uart implementation by modifyin
 You'd just have to figure out how to wait on either data in the input register from the user program, or communication 
 starting from the other side. There's a race-condition there though, maybe I'll get to that later.
 
+
 #### Byte-protocol
 
 Since I'm using hardware to send data bit-by-bit I made a slimmed-down protocol. The right side has 28 buttons and a
 rotary-encoder. A delta can be fit into a single byte. 
+
+---
+
+*Edit 2024-04-17*
+
+Changed this to two bytes, where the content is sandwitched between a header and footer like this:
+
+```rust
+const HEADER: u16 = 0b0101_0000_0000_0000;
+const FOOTER: u16 = 0b0000_0000_0000_0101;
+// convert 8 bit msg into 16 bits, shift it 4 to the left
+// Then OR with header and footer to create 16 bits with the actual message at the middle
+let msg = ((byte_to_send as u16) << 4) | HEADER | FOOTER;
+```
+
+The reason is that if the right-side is disconnected and reconnected, the lowering and then 
+raising of the uart-pin becomes a valid message, but it'll be wrong. Either it will be all `0s` or all `1s` 
+at the head or tail of the message, which these bit-patterns eliminate.
+
+---
 
 Visualizing the keyboard's keys as a matrix with `5` rows, and `6` columns there's at most 30 keys. 
 The keys can be translated into a matrix-index where `0,0` => `0`, `1,0` -> `6`, `2, 3` -> `15`, by rolling out 
@@ -1007,6 +1028,17 @@ and be able to detect a change lasting for `20μs` or more on both sides.
 
 The transfer rate between sides is set by the uart baud-rate which is `781 250` bits per second.  
 This calculates to `10.24μs` per byte sent, all messages sent are at most `1` byte.  
+
+---
+
+*Edit 2040-04-17*
+
+I changed to protocol to be two bytes for robustness, but updated the baud-rate to 20x.
+
+This puts one message at `1.024μs` of latency with better robustness.
+
+---
+
 
 Worst case scenario *should* therefore be the `os_poll_latency + left_side_right_change_latency + right_side_latency + transfer_latency`,
 which would be `1000μs + 70μs + 25μs + 10μs = 1105μs`, when a single key is pressed on the right side,`os_poll_latency + left_side_left_change_latency = 1060μs` on the left. 
