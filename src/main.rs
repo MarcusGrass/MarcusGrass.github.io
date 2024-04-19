@@ -18,6 +18,7 @@ const LOCATIONS: &[LocationInfo] = &[
     LocationInfo::new("/static-pie.html", "StaticPie", "static-pie"),
     LocationInfo::new("/kbd-smp.html", "KbdSmp", "kbd-smp"),
     LocationInfo::new("/rust-kbd.html", "RustKbd", "rust-kbd"),
+    LocationInfo::new("/x11-to-xcb.html", "X11ToXcb", "x11-to-xcb"),
     LocationInfo::new("/test.html", "Test", "test"),
 ];
 

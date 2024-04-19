@@ -17,5 +17,9 @@ I made things easier for myself and made navigation happen through this md-page 
 - [Threads - Tiny-std has threading support](/threads.html)
 - [Static pie - Tiny-std can compile as static-pie](/static-pie.html)
 - [Keyboard SMP - Multithreading in your keyboard](/kbd-smp.html)
-- [Rust kbd - Keyboard firmware in rust](rust-kbd.html)
+- [Rust kbd - Keyboard firmware in rust](/rust-kbd.html)
 - [Test](/test.html)
+
+## Retrospectives
+
+- [RIIR, postmortem on changing out C-bindings for a pure Rust implementation](/x11-to-xcb.html)
