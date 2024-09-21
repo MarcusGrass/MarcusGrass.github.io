@@ -1,17 +1,57 @@
 # Rust for Linux, how hard is it to write a Kernel module in Rust at present?
 
 Once again I'm back on parental leave, I've been lazily following the [Rust for Linux](https://rust-for-linux.com/) 
-effort but finally decided to get into it and write a simple kernel module in `Rust`.  
+effort but finally decided to get into it and write a simple kernel module in `Rust`.
 
-## Contents
+## Introduction
 
 This write-up is about writing a kernel module in `Rust` which will expose a file under `/proc/rust-proc-file`, 
 the file is going to function as a regular file, but backed by pure ram.  
 
 It'll go through zero-cost abstractions and how one can safely wrap `unsafe extern "C" fn`'s hiding away 
-the gritty details of `C`-API's.
+the gritty details of `C`-APIs.
 
 It'll also go through numerous way of causing and avoiding UB, as well as some kernel internals.  
+
+This write-up is code-heavy, all code shown is licensed under GPLv2 and generally there are links 
+with the code which can be followed to the source which also contains its license.  
+
+## Table of contents
+<!-- TOC -->
+* [Rust for Linux, how hard is it to write a Kernel module in Rust at present?](#rust-for-linux-how-hard-is-it-to-write-a-kernel-module-in-rust-at-present)
+  * [Introduction](#introduction)
+  * [Table of contents](#table-of-contents)
+  * [Objective](#objective)
+    * [The proc Filesystem](#the-proc-filesystem)
+      * [A proc 'file'](#a-proc-file)
+      * [The proc API](#the-proc-api)
+      * [proc_open](#proc_open)
+      * [proc_read](#proc_read)
+      * [proc_write](#proc_write)
+      * [proc_lseek](#proc_lseek)
+    * [Implementing it in Rust](#implementing-it-in-rust)
+      * [Generating bindings](#generating-bindings)
+      * [unsafe extern "C" fn](#unsafe-extern-c-fn)
+      * [Abstraction](#abstraction)
+      * [Better function signatures](#better-function-signatures)
+      * [Getting to work](#getting-to-work)
+        * [User pointers](#user-pointers)
+      * [Writing the module](#writing-the-module)
+      * [Mutex](#mutex)
+      * [Storing the ProcDirEntry](#storing-the-procdirentry)
+      * [Memory lifecycle, you, me, and `C`](#memory-lifecycle-you-me-and-c)
+        * [A user interaction](#a-user-interaction)
+        * [Constraints caused by `'static`-lifetimes](#constraints-caused-by-static-lifetimes)
+        * [Using static data for the backing storage](#using-static-data-for-the-backing-storage)
+        * [MaybeUninit<T> vs UnsafeCell<Option<T>>](#maybeuninitt-vs-unsafecelloptiont)
+        * [Global POPS and an unsound API](#global-pops-and-an-unsound-api)
+        * [Deallocation](#deallocation)
+  * [Summing up](#summing-up)
+    * [Generating bindings](#generating-bindings-1)
+    * [Wrapping the API with reasonable lifetimes](#wrapping-the-api-with-reasonable-lifetimes)
+    * [Dealing with static data in a concurrent context](#dealing-with-static-data-in-a-concurrent-context)
+    * [Tradeoff between soundness and performance](#tradeoff-between-soundness-and-performance)
+<!-- TOC -->
 
 ## Objective
 
@@ -22,26 +62,27 @@ that I've been unable to implement in user-space, so it just hasn't happened.
 
 Sadly, that's still the case, so I had to contrive something: A proc-file that works just like a regular file.  
 
-### The /proc Filesystem
+### The proc Filesystem
 
 The stated purpose of the `/proc` filesystem is to "provide information about the running Linux System", read 
 more about it [here](https://www.kernel.org/doc/html/latest/filesystems/proc.html).  
 
 On a Linux machine with the `/proc` filesystem you can find process information e.g. under `/proc/<pid>/..`, 
-like memory usage, mounts, cpu-usage, fd's, etc. With the above stated purpose, and how the `/proc` filesystem is 
-used, the purpose of this module doesn't quite fit, but for simplicity that's what I chose.
+like memory usage, mounts, cpu-usage, fds, etc. With the above stated purpose, and how the `/proc` filesystem is 
+used, the purpose of this module doesn't quite fit, but for simplicity I chose `proc` anyway.
 
 #### A proc 'file'
 
-Proc files can be created by the kernels `proc_fs`-api, it lives [here](https://github.com/Rust-for-Linux/linux/blob/e31f0a57ae1ab2f6e17adb8e602bc120ad722232/include/linux/proc_fs.h).
+Proc files can be created by the kernel's `proc_fs`-api, it lives [here](https://github.com/Rust-for-Linux/linux/blob/e31f0a57ae1ab2f6e17adb8e602bc120ad722232/include/linux/proc_fs.h).
 
-The function, [proc_create](https://github.com/Rust-for-Linux/linux/blob/e31f0a57ae1ab2f6e17adb8e602bc120ad722232/include/linux/proc_fs.h#L111), looks like this: 
+The function, [proc_create](https://github.com/Rust-for-Linux/linux/blob/e31f0a57ae1ab2f6e17adb8e602bc120ad722232/include/linux/proc_fs.h#L111), 
+which adds a file-entry looks like this: 
 
 ```c
 struct proc_dir_entry *proc_create(const char *name, umode_t mode, struct proc_dir_entry *parent, const struct proc_ops *proc_ops);
 ```
 
-When properly invoked it will create a file under `/proc/<name>` (if no parent is provided).  
+When invoked with correct arguments it will create a file under `/proc/<name>` (if no parent is provided).  
 
 That file is an interface to the kernel, a pseudo-file where the user interacts with it as a regular file on one end, 
 and the kernel provides handlers for regular file-functionality on the other end (like `open`, `read`, `write`, `lseek`, 
@@ -49,7 +90,11 @@ etc.).
 
 That interface is provided through the last argument `...,proc_ops *proc_ops);...`
 
-[proc_ops](https://github.com/Rust-for-Linux/linux/blob/e31f0a57ae1ab2f6e17adb8e602bc120ad722232/include/linux/proc_fs.h#L29) is a struct defined like this:
+#### The proc API
+
+The proc API, as exposed through the `proc_ops`-struct:
+
+[proc_ops](https://github.com/Rust-for-Linux/linux/blob/e31f0a57ae1ab2f6e17adb8e602bc120ad722232/include/linux/proc_fs.h#L29):
 
 ```c
 struct proc_ops {
@@ -70,6 +115,12 @@ struct proc_ops {
 	unsigned long (*proc_get_unmapped_area)(struct file *, unsigned long, unsigned long, unsigned long, unsigned long);
 } __randomize_layout;
 ```
+
+It accepts flags and function pointers, the function pointers can in many cases be `null` without unsafety, 
+but will impact functionality as a 'file'. For example, if `write`-isn't implement the file won't be writable, 
+that's not a problem if the purpose of the 'file' is to just expose readable information.  
+
+The functions that will be implemented are:
 
 #### proc_open
 
@@ -113,9 +164,9 @@ bytes written, and update the offset through the pointer.
 
 #### proc_write
 
-When a user tries to write to the file, it enters through [proc_write](https://github.com/Rust-for-Linux/linux/blob/e31f0a57ae1ab2f6e17adb8e602bc120ad722232/include/linux/proc_fs.h#L34).
-
-Which looks like this: 
+When a user tries to write to the file, it enters through 
+[proc_write](https://github.com/Rust-for-Linux/linux/blob/e31f0a57ae1ab2f6e17adb8e602bc120ad722232/include/linux/proc_fs.h#L34),
+which looks like this: 
 
 ```c
 ssize_t	(*proc_write)(struct file *f, const char __user *buf, size_t buf_len, loff_t *offset);
@@ -148,7 +199,7 @@ Assuming that the offset makes sense, the kernel should return the new offset.
 ### Implementing it in Rust
 
 That's it, with those 4 functions implemented there should be a fairly complete working 
-file created when they're passed as members of the `proc_ops`-struct, time to start!
+file created when the functions are passed as members of the `proc_ops`-struct, time to start!
 
 #### Generating bindings
 
@@ -219,8 +270,8 @@ think more about that, the problem solved itself.
 #### Abstraction
 
 As mentioned previously, one key-point of rust is being able to 
-abstract away unsafety, ideally an API would consist of `Rust` function-signatures 
-containing refernces instead of `C`-style function-signatures containing raw pointers, 
+abstract away `unsafety`, ideally an API would consist of `Rust` function-signatures 
+containing references instead of `C`-style function-signatures containing raw pointers, 
 it's a bit tricky, but it can be done.
 
 Here's an example of how to do the conversion in a way with zero-cost:
@@ -322,7 +373,7 @@ Again, the entire function was inlined, even though a [`dyn`-trait](https://doc.
 the compiler can figure out that it should/can be inlined.  
 
 This may seem a bit useless, since the only difference between the pre- and post-abstraction
-code is having the function connected to a struct, but using that better abstractions can be provided.
+code is having the function connected to a struct, but using that, better abstractions can be provided.
 
 #### Better function signatures
 
@@ -383,12 +434,12 @@ fn proc_lseek(file: *mut kernel::bindings::file,
 
 Or even better, since even though the bindings specify a `*mut`, [converting that to a mutable reference 
 is likely going to cause UB](https://doc.rust-lang.org/nomicon/aliasing.html), but converting it to 
-an immutable reference **should** be safe.
+an immutable reference is slightly more likely be safe.
 
 ```rust
 fn proc_lseek(file: &kernel::bindings::file,
     offset: kernel::bindings::loff_t,
-    whence: Whence) -> kernel::bindings::loff_t;
+    whence: Whence) -> Result<kernel::bindings::loff_t>;
 ```
 
 Making a safer abstraction over the bindings struct `file` would be even better, but deemed out of scope, 
@@ -397,7 +448,8 @@ the rust-api now communicates that lseek takes a reference to a file that should
 can only be one of 5 types. 
 
 However, something needs to wrap this `Rust`-function, validate that `Whence` can be converted from the provided `int` 
-from the `C`-style function, and check that the file-pointer is non-null, and turn it into a reference. 
+from the `C`-style function, and check that the file-pointer is non-null, turn it into a reference, and lastly handle 
+the `Result`. 
 
 Here's an example of how that could look: 
 
@@ -562,6 +614,8 @@ where
         file: *mut kernel::bindings::file,
     ) -> i32 {
         ...
+        // Call T::OPEN 
+        ...
     }
     unsafe extern "C" fn proc_read(
         file: *mut kernel::bindings::file,
@@ -569,6 +623,8 @@ where
         buf_cap: usize,
         read_offset: *mut kernel::bindings::loff_t,
     ) -> isize {
+        ...
+        // Call T::READ 
         ...
     }
     unsafe extern "C" fn proc_write(
@@ -578,12 +634,16 @@ where
         write_offset: *mut kernel::bindings::loff_t,
     ) -> isize {
         ...
+        // Call T::WRITE 
+        ...
     }
     unsafe extern "C" fn proc_lseek(
         file: *mut kernel::bindings::file,
         offset: kernel::bindings::loff_t,
         whence: core::ffi::c_int,
     ) -> kernel::bindings::loff_t {
+        ...
+        // Call T::LSEEK 
         ...
     }
 }
@@ -680,6 +740,8 @@ fn plseek(
 
 ```
 
+##### User pointers
+
 Oh right, the `__user`-part.  
 
 On the first iterations of this module I conveniently ignored it, when the kernel is passed a buffer from a user 
@@ -764,7 +826,7 @@ impl kernel::Module for RustProcRamFile {
 }
 ```
 
-On hitch is that the module needs to be safe for concurrent access, it needs to be both `Send` + `Sync`.  
+One hitch is that the module needs to be safe for concurrent access, it needs to be both `Send` + `Sync`.  
 
 Remembering that the objective is to build a `file` that is backed by just bytes (a `Vec<u8>` being most convenient), 
 creating a `RustProcRamFile(Vec<u8>)` won't cut it.
@@ -797,6 +859,9 @@ let pin_init_lock = kernel::new_mutex!(Some(data), "proc_ram_mutex");
 `pin_init_lock` is something that implements [PinInit](https://github.com/MarcusGrass/linux/blob/8e8c948133ca1a0cbf8f8add191daa739a193d99/rust/kernel/init.rs#L838), 
 the most important function of which is `__pinned_init(self, slot: *mut T)`  
 which takes uninitialized memory that fits a `T` and initializes the variable there.  
+What pinning is, why it's necessary, and how to use it properly I won't get into, people have 
+explained it significantly better than I ever could [Without boats](https://without.boats/blog/pin/) for example.
+For this purpose, `PinInit` could be thought of as a function looking for some memory to place its value.
 
 For reasons that will become clearer later, the `mutex` will be initialized into static memory.  
 
@@ -807,7 +872,7 @@ mod backing_data {
     use core::cell::UnsafeCell;
     use kernel::sync::lock::{mutex::MutexBackend, Lock};
     use super::*;
-    static mut MAYBE_UNUNIT_DATA_SLOT: MaybeUninit<Mutex<Option<alloc::vec::Vec<u8>>>> =
+    static mut MAYBE_UNINIT_DATA_SLOT: MaybeUninit<Mutex<Option<alloc::vec::Vec<u8>>>> =
         MaybeUninit::uninit();
     ...
 
@@ -819,7 +884,7 @@ mod backing_data {
         lock_ready: impl PinInit<Lock<Option<alloc::vec::Vec<u8>>, MutexBackend>>,
     ) -> Result<()> {
         unsafe {
-            let slot = MAYBE_UNUNIT_DATA_SLOT.as_mut_ptr();
+            let slot = MAYBE_UNINIT_DATA_SLOT.as_mut_ptr();
             lock_ready.__pinned_init(slot)?;
         }
         Ok(())
@@ -830,7 +895,7 @@ mod backing_data {
     /// Safe only if called after initialization, otherwise
     /// it will return a pointer to uninitialized memory.  
     pub(super) unsafe fn get_initialized_data() -> &'static Mutex<Option<alloc::vec::Vec<u8>>> {
-        unsafe { MAYBE_UNUNIT_DATA_SLOT.assume_init_ref() }
+        unsafe { MAYBE_UNINIT_DATA_SLOT.assume_init_ref() }
     }
     ...
 }
@@ -851,22 +916,23 @@ impl kernel::Module for RustProcRamFile {
 
 That's quite a lot. 
 
-First off, the `static mut MAYBE_UNUNIT_DATA_SLOT: MaybeUninit<Mutex<Option<alloc::vec::Vec<u8>>>> = MaybeUninit::uninit();` 
+First off, the `static mut MAYBE_UNINIT_DATA_SLOT: MaybeUninit<Mutex<Option<alloc::vec::Vec<u8>>>> = MaybeUninit::uninit();` 
 creates static uninitialized memory, that's represented by the [MaybeUninit](https://doc.rust-lang.org/std/mem/union.MaybeUninit.html).
 The memory has space for a `Mutex` containing an `Option<alloc::vec::Vec<u8>>`.  
 
 The reason for having the inner data be `Option` is to be able to remove it on module-unload and properly cleaning it up. 
-The `Drop`-code will show how that cleanup works in more detail, and it's likely a bit pedantic.  
+The `Drop`-code will show how that cleanup works in more detail, and it's likely a bit pedantic but definitively 
+prevents the backing data from leaking. Guaranteeing that when the module is unloaded, the data is deallocated.  
 
 Second, in the module's `init`, a `Vec` is created, and put into a `PinInit -> Mutex` that needs memory for initialization.  
-That `PinInit` is passed to `init_data` which takes a pointer to the static memory `MAYBE_UNUNIT_DATA_SLOT` and writes 
+That `PinInit` is passed to `init_data` which takes a pointer to the static memory `MAYBE_UNINIT_DATA_SLOT` and writes 
 the mutex into it.  
 
 Now There's an initialized `Mutex`.  
 
 #### Storing the ProcDirEntry
 
-Now a `proc_create` can be called which will create a `proc`-file. 
+Now `proc_create` can be called which will create a `proc`-file. 
 
 ```rust
 mod backing_data {
@@ -887,7 +953,7 @@ mod backing_data {
 
     /// Remove the PDE
     /// # Safety
-    /// While safe to invoke regardless of PDE initalization,
+    /// While safe to invoke regardless of PDE initialization,
     /// any concurrent access is unsafe.  
     pub(super) unsafe fn take_pde() -> Option<ProcDirEntry<'static>> {
         unsafe {
@@ -1078,6 +1144,18 @@ have a `'static`-requirement that doesn't work.
 Even if the data is wrapped in a `Box`, or an `Arc`, the `RustProcRamFile`-module can't own it for the above reason, 
 the functions needs to live for the duration of the program (and be valid), a global static is necessary (sigh).  
 
+But, the killer that makes it impossible to make the state a part of `RustProcRamFile` is that 
+the function-pointers that are exposed cannot capture state, if the state is a part of `RustProcRamFile`, to access 
+it through a function, the signature would have to be:
+
+```rust
+fn popen(&self, ...) ... {
+    ...
+}
+```
+
+Which cannot be made to fit the required function signature of the `C`-api.
+
 Here is where the globals come in: 
 
 ```rust
@@ -1187,7 +1265,7 @@ or having to be maintained by someone else. In that case opting for soundness ma
 'window' for creating UB here is quite slim.  
 
 
-#### Deallocation
+##### Deallocation
 
 Finally, the data is set up, and can be used with some constraints, now the teardown.  
 
@@ -1236,7 +1314,7 @@ All important parts are now covered, the actual implementation of `pread`, `pwri
 and straight-forward, the full code can be found [here](https://github.com/MarcusGrass/linux/tree/8e8c948133ca1a0cbf8f8add191daa739a193d99) 
 if that, and the rest of the implementation is interesting.  
 
-### Generating bindings 
+### Generating bindings
 
 First off bindings for the Linux `C`-API for creating a `proc-file` had to be generated, it only required adding 
 a header in the list [here](https://github.com/MarcusGrass/linux/blob/8e8c948133ca1a0cbf8f8add191daa739a193d99/rust/bindings/bindings_helper.h#L19)
