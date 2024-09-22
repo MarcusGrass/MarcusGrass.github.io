@@ -3,6 +3,7 @@
 Once again I'm back on parental leave, I've been lazily following the [Rust for Linux](https://rust-for-linux.com/) 
 effort but finally decided to get into it and write a simple kernel module in `Rust`.
 
+---
 
 ## Introduction
 
@@ -12,12 +13,15 @@ the file is going to function as a regular file, but backed by pure ram.
 It'll go through zero-cost abstractions and how one can safely wrap `unsafe extern "C" fn`'s hiding away 
 the gritty details of `C`-APIs.
 
-It'll also go through numerous way of causing and avoiding UB, as well as some kernel internals.  
+It'll also go through numerous ways of causing and avoiding UB, as well as some kernel internals.  
 
 This write-up is code-heavy, all code shown is licensed under GPLv2 and generally there are links 
 with the code which can be followed to the source which also contains its license.  
 
+---
+
 ## Table of contents
+
 <!-- TOC -->
 * [Rust for Linux, how hard is it to write a Kernel module in Rust at present?](#rust-for-linux-how-hard-is-it-to-write-a-kernel-module-in-rust-at-present)
   * [Introduction](#introduction)
@@ -52,7 +56,10 @@ with the code which can be followed to the source which also contains its licens
     * [Wrapping the API with reasonable lifetimes](#wrapping-the-api-with-reasonable-lifetimes)
     * [Dealing with static data in a concurrent context](#dealing-with-static-data-in-a-concurrent-context)
     * [Tradeoff between soundness and performance](#tradeoff-between-soundness-and-performance)
+    * [Shortcomings](#shortcomings)
 <!-- TOC -->
+
+---
 
 ## Objective
 
@@ -63,21 +70,27 @@ that I've been unable to implement in user-space, so it just hasn't happened.
 
 Sadly, that's still the case, so I had to contrive something: A proc-file that works just like a regular file.  
 
+---
+
 ### The proc Filesystem
 
 The stated purpose of the `/proc` filesystem is to "provide information about the running Linux System", read 
 more about it [here](https://www.kernel.org/doc/html/latest/filesystems/proc.html).  
 
 On a Linux machine with the `/proc` filesystem you can find process information e.g. under `/proc/<pid>/..`, 
-like memory usage, mounts, cpu-usage, fds, etc. With the above stated purpose, and how the `/proc` filesystem is 
-used, the purpose of this module doesn't quite fit, but for simplicity I chose `proc` anyway.
+like memory usage, mounts, cpu-usage, fds, etc. With the above stated purpose and how the `/proc` filesystem is 
+used the purpose of this module doesn't quite fit it, but for simplicity I chose `proc` anyway.
+
+---
 
 #### A proc 'file'
 
 Proc files can be created by the kernel's `proc_fs`-api, it lives [here](https://github.com/Rust-for-Linux/linux/blob/e31f0a57ae1ab2f6e17adb8e602bc120ad722232/include/linux/proc_fs.h).
+Proc files are not like the most commonly imagined regular file, some data that exists on a disk somewhere, 
+it's an interface into the kernel.  
 
-The function, [proc_create](https://github.com/Rust-for-Linux/linux/blob/e31f0a57ae1ab2f6e17adb8e602bc120ad722232/include/linux/proc_fs.h#L111), 
-which adds a file-entry looks like this: 
+On the kernel side, to create the 'file' [proc_create](https://github.com/Rust-for-Linux/linux/blob/e31f0a57ae1ab2f6e17adb8e602bc120ad722232/include/linux/proc_fs.h#L111), 
+can be used, it looks like this: 
 
 ```c
 struct proc_dir_entry *proc_create(const char *name, umode_t mode, struct proc_dir_entry *parent, const struct proc_ops *proc_ops);
@@ -90,6 +103,8 @@ and the kernel provides handlers for regular file-functionality on the other end
 etc.).  
 
 That interface is provided through the last argument `...,proc_ops *proc_ops);...`
+
+---
 
 #### The proc API
 
@@ -118,10 +133,12 @@ struct proc_ops {
 ```
 
 It accepts flags and function pointers, the function pointers can in many cases be `null` without unsafety, 
-but will impact functionality as a 'file'. For example, if `write`-isn't implement the file won't be writable, 
+but will impact functionality for the 'file'. For example, if `write`-isn't implement the file won't be writable, 
 that's not a problem if the purpose of the 'file' is to just expose readable information.  
 
-The functions that will be implemented are:
+The functions that will be implemented follows.
+
+---
 
 #### proc_open
 
@@ -143,14 +160,15 @@ It just returns `0` for success.
 ---
 
 There are cases where one would like to do something when the file is opened, in that case, 
-the *file pointer could be modified, for example by editing the `void *private_data`-field to add some data 
-that will follow the file into its coming operations. 
+the `*file`-pointer could be modified, for example by editing the `void *private_data`-field to add some data 
+that will follow the file through its coming operations. 
 Read some more about the [file structure here](https://www.oreilly.com/library/view/linux-device-drivers/0596000081/ch03s04.html), 
 or check out its definition [here](https://github.com/Rust-for-Linux/linux/blob/e31f0a57ae1ab2f6e17adb8e602bc120ad722232/include/linux/fs.h#L992).  
+---
 
 #### proc_read
 
-Now it's getting into some logic, when a user wants to read from the file 
+Now onto some logic, when a user wants to read from the file 
 it provides a buffer and an offset pointer, the signature looks like 
 [this:](https://github.com/Rust-for-Linux/linux/blob/e31f0a57ae1ab2f6e17adb8e602bc120ad722232/include/linux/proc_fs.h#L32)
 
@@ -158,12 +176,14 @@ it provides a buffer and an offset pointer, the signature looks like
 ssize_t	proc_read(struct file *f, char __user *buf, size_t buf_len, loff_t *offset);
 ```
 
-Again there's the file structure-pointer which could contain data that 
+Again there's the file structure-pointer which could contain eg.g `private_data` that 
 was put there in an `open`-implementation, as well as a suspiciously annotated 
 `char __user *buf`.
 
 The kernel should write data into the user buffer, return the number of 
 bytes written, and update the offset through the pointer.
+
+---
 
 #### proc_write
 
@@ -180,6 +200,8 @@ a pointer to update the offset. Again suspiciously annotating the buffer with `_
 
 The kernel should write data from the user buffer into the backing storage.  
 
+---
+
 #### proc_lseek
 
 Lastly, if the file is to be seekable to an offset [proc_lseek](https://github.com/Rust-for-Linux/linux/blob/e31f0a57ae1ab2f6e17adb8e602bc120ad722232/include/linux/proc_fs.h#L36)
@@ -192,17 +214,20 @@ loff_t (*proc_lseek)(struct file *f, loff_t offset, int whence);
 ```
 
 Again the file is provided, the offset to seek to, and `whence` to seek, 
-whence is an int which should have one of 5 values, those are described 
+`whence` is an `int` which should have one of 5 values, those are described 
 more in the docs [here](https://man7.org/linux/man-pages/man2/lseek.2.html), 
 the most intuitive one is `SEEK_SET` which means that the file's offset should 
 be set to the offset that the user provided.  
 
-Assuming that the offset makes sense, the kernel should return the new offset.  
+Assuming that the offset makes sense, the module should return the new offset.  
+
+---
 
 ### Implementing it in Rust
 
 That's it, with those 4 functions implemented there should be a fairly complete working 
 file created when the functions are passed as members of the `proc_ops`-struct, time to start!
+
 
 #### Generating bindings
 
@@ -211,6 +236,7 @@ They're conveniently added when building, as long as the correct headers are
 added [here](https://github.com/MarcusGrass/linux/blob/8e8c948133ca1a0cbf8f8add191daa739a193d99/rust/bindings/bindings_helper.h#L19), 
 for this module only `proc_fs.h` is needed.  
 
+
 #### unsafe extern "C" fn
 
 Since `Rust` is compatible with `C` by jumping through some hoops, 
@@ -218,9 +244,10 @@ theoretically the module could be implemented by just using the C-api
 directly as-is through the functions provided by the bindings. 
 
 One of `Rust`'s strengths is being able to take unsafe code and make safe abstractions 
-on top of them. But, it's a good start to figure out how the API's work.  
+on top of them. But, using those functions directly can be a good start to figure out 
+how the APIs work.  
 
-The generated rust functions-pointer-definitions look like this:
+The generated `Rust` functions-pointer-definitions look like this:
 
 ```rust
 unsafe extern "C" fn proc_open(
@@ -258,24 +285,26 @@ unsafe extern "C" fn proc_lseek(
 
 ```
 
-One key difference between these C-style function declarations and something 
+One difference between these `C`-style function declarations and something 
 like `Rust`'s [`Fn`-traits](https://doc.rust-lang.org/std/ops/trait.Fn.html) 
 is that these function cannot capture any state.  
 
 This necessitates using global-static for persistent state that has to 
-be shared between user-calls into the proc-file.
-(For modifications that do not have to be shared or persisted after the interaction ends
-, the `file`'s private data could be used).  
+be shared between user-calls into the proc-file (like writing to the backing file data).
+For modifications that do not have to be shared or persisted after the interaction ends
+, the `file`'s private data could be used.  
 
-Another key difference is that that pesky `__user`-annotation is finally gone, let's not 
+Another difference is that that pesky `__user`-annotation is finally gone, let's not 
 think more about that, the problem solved itself.  
+
+---
 
 #### Abstraction
 
-As mentioned previously, one key-point of rust is being able to 
+As mentioned previously, a strength of `Rust`'s is being able to 
 abstract away `unsafety`, ideally an API would consist of `Rust` function-signatures 
 containing references instead of `C`-style function-signatures containing raw pointers, 
-it's a bit tricky, but it can be done.
+it's a bit tricky, but it can be done without overhead.
 
 Here's an example of how to do the conversion in a way with zero-cost:
 
@@ -378,6 +407,8 @@ the compiler can figure out that it should/can be inlined.
 This may seem a bit useless, since the only difference between the pre- and post-abstraction
 code is having the function connected to a struct, but using that, better abstractions can be provided.
 
+---
+
 #### Better function signatures
 
 Looking again at the function pointer that will be invoked for `lseek`:
@@ -445,12 +476,16 @@ fn proc_lseek(file: &kernel::bindings::file,
     whence: Whence) -> Result<kernel::bindings::loff_t>;
 ```
 
+---
+
 Making a safer abstraction over the bindings struct `file` would be even better, but deemed out of scope, 
 the rust-api now communicates that lseek takes a reference to a file that should not be mutated 
 (it can safely be mutated with synchronization, again out of scope), an offset, and a `Whence`-enum which 
 can only be one of 5 types. 
 
-However, something needs to wrap this `Rust`-function, validate that `Whence` can be converted from the provided `int` 
+---
+
+Continuing, something needs to wrap this `Rust`-function, validate that `Whence` can be converted from the provided `int` 
 from the `C`-style function, and check that the file-pointer is non-null, turn it into a reference, and lastly handle 
 the `Result`. 
 
@@ -658,6 +693,8 @@ constants for each of the functions to be provided. Those constants are `'static
 Then it defines the `ProcOps`-struct, which is generic over `ProcHandler`, it defines the correct `C`-style 
 functions which do conversions and call the provided `ProcHandler`'s `'&static`-functions and return their results.  
 
+---
+
 Using this, the `C`-style proc_create function can get a `Rust`-abstraction taking that `ProcOps`-struct:
 
 ```rust
@@ -693,6 +730,8 @@ where
     }
 }
 ```
+
+---
 
 #### Getting to work
 
@@ -743,6 +782,8 @@ fn plseek(
 
 ```
 
+---
+
 ##### User pointers
 
 Oh right, the `__user`-part.  
@@ -766,6 +807,8 @@ doesn't have access to).
 4. Do the actual copying
 
 The `Rust` kernel code fairly conveniently wraps this into an api [here](https://github.com/MarcusGrass/linux/blob/8e8c948133ca1a0cbf8f8add191daa739a193d99/rust/kernel/uaccess.rs).  
+
+---
 
 The api is used in the wrapper for `PropOps`, it looks like this: 
 
@@ -795,6 +838,8 @@ Which again, has a signature that looks like this:
 ```rust
 pub type ProcRead<'a> = &'a dyn Fn(&file, UserSliceWriter, &loff_t) -> Result<(usize, usize)>;
 ```
+
+---
 
 #### Writing the module
 
@@ -836,6 +881,8 @@ creating a `RustProcRamFile(Vec<u8>)` won't cut it.
 
 There's a need for shared mutable state and that's where this gets tricky.
 
+---
+
 #### Mutex
 
 One of the simplest ways of creating (simplest by mental model at least) is by wrapping the state with a mutual-exclusion
@@ -867,6 +914,8 @@ explained it significantly better than I ever could [Without boats](https://with
 For this purpose, `PinInit` could be thought of as a function looking for some memory to place its value.
 
 For reasons that will become clearer later, the `mutex` will be initialized into static memory.  
+
+---
 
 Finally, to initialize the data that the `file` will be backed by, the code looks like this:
 
@@ -1376,3 +1425,19 @@ regular `const <VAR>`.
 
 Lastly, there was a tradeoff where some functions were arbitrarily marked as safe, even though they are unsafe under 
 same conditions. Whether that tradeoff is justified is up to the programmer.  
+
+### Shortcomings
+
+There are a few things that should be fixed up to make this module properly safe.
+
+1. Make sure that the `*file` can be turned into an immutable reference, or better yet, 
+create a `Rust`-abstraction for it. It itself contains locks, and data that is safe to mutate 
+behind those locks. For it to safely be an immutable reference, that data must not be changed
+while holding the immutable reference, with or without the lock, since the data isn't modeled
+to be guarded, from `Rust`'s point of vue that immutable data changed when we promised not to.
+That can't happen from `Rust`-code because of the immutable reference, but if `C`-code changes it
+that's UB.
+2. Make the module-api sound by implementing or using `PinInit` in such a way that an
+`static UnsafeCell<Option<..>>` can be used instead of a `static mut MaybeUninit`, 
+there should be no performance hit if using `unwrap_unchecked` on the option anyway, it's just
+better.  
