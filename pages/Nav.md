@@ -18,6 +18,7 @@ I made things easier for myself and made navigation happen through this md-page 
 - [Static pie - Tiny-std can compile as static-pie](/static-pie.html)
 - [Keyboard SMP - Multithreading in your keyboard](/kbd-smp.html)
 - [Rust kbd - Keyboard firmware in rust](/rust-kbd.html)
+- [RustProcRamFile - a simple rust kernel module](/rust-linux-kernel-module.html)
 - [Test](/test.html)
 
 ## Retrospectives

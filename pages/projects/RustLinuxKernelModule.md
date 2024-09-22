@@ -3,6 +3,7 @@
 Once again I'm back on parental leave, I've been lazily following the [Rust for Linux](https://rust-for-linux.com/) 
 effort but finally decided to get into it and write a simple kernel module in `Rust`.
 
+
 ## Introduction
 
 This write-up is about writing a kernel module in `Rust` which will expose a file under `/proc/rust-proc-file`, 
@@ -139,6 +140,8 @@ int proc_open(struct inode *inode, struct file *file)
 
 It just returns `0` for success.  
 
+---
+
 There are cases where one would like to do something when the file is opened, in that case, 
 the *file pointer could be modified, for example by editing the `void *private_data`-field to add some data 
 that will follow the file into its coming operations. 
@@ -210,11 +213,11 @@ for this module only `proc_fs.h` is needed.
 
 #### unsafe extern "C" fn
 
-Since Rust is compatible with `C` by jumping through some hoops, 
+Since `Rust` is compatible with `C` by jumping through some hoops, 
 theoretically the module could be implemented by just using the C-api 
 directly as-is through the functions provided by the bindings. 
 
-The power of Rust is being able to take unsafe code and make safe abstractions 
+One of `Rust`'s strengths is being able to take unsafe code and make safe abstractions 
 on top of them. But, it's a good start to figure out how the API's work.  
 
 The generated rust functions-pointer-definitions look like this:
@@ -914,21 +917,30 @@ impl kernel::Module for RustProcRamFile {
 }
 ```
 
-That's quite a lot. 
+That's quite a lot.
+
+---
 
 First off, the `static mut MAYBE_UNINIT_DATA_SLOT: MaybeUninit<Mutex<Option<alloc::vec::Vec<u8>>>> = MaybeUninit::uninit();` 
 creates static uninitialized memory, that's represented by the [MaybeUninit](https://doc.rust-lang.org/std/mem/union.MaybeUninit.html).
 The memory has space for a `Mutex` containing an `Option<alloc::vec::Vec<u8>>`.  
+Using `static mut` is heavily discouraged, some more details [here](https://doc.rust-lang.org/rustc/lints/listing/warn-by-default.html#static-mut-refs), 
+it's extremely easy to get it wrong, using it as in the above code is fine however. Messing with the `static mut` is 
+delegated to a submodule to encapsulate the handling more.  
 
 The reason for having the inner data be `Option` is to be able to remove it on module-unload and properly cleaning it up. 
 The `Drop`-code will show how that cleanup works in more detail, and it's likely a bit pedantic but definitively 
 prevents the backing data from leaking. Guaranteeing that when the module is unloaded, the data is deallocated.  
+
+---
 
 Second, in the module's `init`, a `Vec` is created, and put into a `PinInit -> Mutex` that needs memory for initialization.  
 That `PinInit` is passed to `init_data` which takes a pointer to the static memory `MAYBE_UNINIT_DATA_SLOT` and writes 
 the mutex into it.  
 
 Now There's an initialized `Mutex`.  
+
+---
 
 #### Storing the ProcDirEntry
 
@@ -1003,9 +1015,10 @@ fn init(_module: &'static ThisModule) -> Result<Self> {
     }
 ```
 
-That's also quite a lot.  
-
+That's also quite a lot.
 Now the code is encountering issues with unsoundness (an API that is not marked as unsafe but is unsafe under some conditions).  
+
+---
 
 Starting from the top:
 
@@ -1026,6 +1039,8 @@ It tells the compiler that even though it doesn't look `Sync` it should treat is
 (`Sync` and `Send` are examples of automatic trait implementations, if a `struct` contain types that all implement
 `Send` and/or `Sync`, that struct will also implement `Send` or `Sync`, a bit more on that [here](https://doc.rust-lang.org/stable/unstable-book/language-features/auto-traits.html)).  
 
+---
+
 Next comes two `unsafe` functions. One sets the `ENTRY` to a provided `ProcDirEntry<'static>`, 
 the operation is safe as long as it doesn't happen concurrently, that would create a data-race.  
 
@@ -1035,6 +1050,8 @@ through [rmmod](https://linux.die.net/man/8/rmmod), `rmmod rust_proc_ram_file`.
 Entering the `init`-function, there are struct definitions and trait-implementations defined inside the function.  
 The reasons for this is to make some inherent `unsoundness` about the memory-lifecycle less dangerous, it's worth getting 
 into why that it is, and what the trade-offs of having some `unsoundness` is.
+
+---
 
 #### Memory lifecycle, you, me, and `C`
 
@@ -1062,8 +1079,10 @@ struct proc_ops {
 struct proc_dir_entry *proc_create(const char *name, umode_t mode, struct proc_dir_entry *parent, const struct proc_ops *proc_ops);
 ```
 
-So, the module needs to call the function `proc_create` supplying a pointer `const struct proc_ops *proc_ops`
+The module needs to call the function `proc_create` supplying a pointer `const struct proc_ops *proc_ops`
 which itself contains function pointers. What are the lifetime requirements?
+
+---
 
 `const struct proc_ops *proc_ops` has a requirement to live until `proc_remove` is called on the returned `proc_dir_entry*`, 
 that's easily represented in `Rust`, we could model the API to accept something with the lifetime `'a` and return 
@@ -1074,25 +1093,31 @@ But how long do the function pointers that are themselves contained in `proc_ops
 On could assume it's the same, `'a`, but let's consider how the kernel 'routes' a user through the module and the 
 lifecycle of an interaction.
 
+---
+
 ##### A user interaction
 
 A user wants to open the file, by name.
 
 1. The user issues the [open](https://man7.org/linux/man-pages/man2/open.2.html) syscall.
-2. The kernel accepts the open syscall, and finds this `*proc_dir_entry`.
+2. The kernel picks up the open syscall, and finds this `*proc_dir_entry`.
 3. The kernel enters the `proc_open`-function.
 4. The kernel sets the correct register return address value.
 5. The kernel yields execution.
 
+---
+
 The kernel handles two pointers from the module, non-atomically, in separate steps, multiple users could trigger 
 this interaction concurrently (the reason for the lock).  
 
-So, in the case that there exists a `*proc_dir_entry` but the `proc_open`-function pointer is 
-[dangling](https://en.wikipedia.org/wiki/Dangling_pointer), 
+In the case that there exists a `*proc_dir_entry` but the `proc_open`-function pointer is 
+[dangling](https://en.wikipedia.org/wiki/Dangling_pointer),
 because the lifetime of it is less than `*proc_dir_entry`, or they have the same lifetime but the mechanics of 
 the free happens in an unfavourable order. In that case, the kernel will try to access a dangling pointer, 
 which may or may not cause chaos. A dangling pointer is worse than a null-pointer in this case, since a 
-null-pointer is generally going to be acceptable.  
+null-pointer is often acceptable for `*proc_ops`-functions.  
+
+---
 
 In another case, the `proc_dir_entry` may definitively be removed first, but since some process may have read the 
 function pointer `proc_open` from it, but not started executing it (race) yet, `proc_open` can theoretically 
@@ -1106,6 +1131,8 @@ const OPEN: kernel::proc_fs::ProcOpen<'static> = &Self::popen;
 ...
 ```
 
+---
+
 ##### Constraints caused by `'static`-lifetimes
 
 Static (sloppily expressed) means 'for the duration of the program', if there's a `'static`-requirement for a variable 
@@ -1114,13 +1141,17 @@ it means that that variable needs its memory to be allocated in the binary.
 An example would be a string literal
 
 ```rust
+// The `'static` lifetime can be elided
 const MY_STR: &'static str = "hello";
-static MY_STR2: &'static str = "hello";
+// Implicitly also `'static`
+static MY_STR2: & str = "hello";
 // or 
 fn my_fn() {
     let my_str = "hello";
 }
 ```
+
+---
 
 In all cases the string-literal exists in the binary, the difference between these cases are that in the 
 case of the `const`-variable some space is allocated in the binary that fits a reference to a `str`, 
@@ -1133,6 +1164,8 @@ it's pointing to (with some constraints).
 
 In the function, space is made available on the stack for the reference, but the actual `hello` is likely again in 
 the `data`-section.  
+
+---
 
 ##### Using static data for the backing storage
 
@@ -1168,13 +1201,13 @@ static ENTRY: SingleAccessPdeStore = SingleAccessPdeStore(UnsafeCell::new(None))
 const POPS: ProcOps<'static, ProcHand> = ProcOps::<'static, ProcHand>::new(0);
 ```
 
-Comes in.
+---
 
 Looking at the definitions, two of these contain data that can (and will) be changed, those are therefore `static`, 
 one (the container of the functions that are passed through the `C`-api) is marked as `const`, since it will never change.  
 
-`MAYBE_UNINIT_DATA_SLOT` is MaybeUninit, so that when the program starts, there is already space made available in 
-the binary for the data it will contain, on module-initialization data will be written into that.  
+`MAYBE_UNINIT_DATA_SLOT` is MaybeUninit, when the program starts, there is already space made available in 
+the binary for the data it will contain, on module-initialization data will be written into that space.  
 
 Same goes for `Entry`, `UnsafeCell` does essentially the same thing, there's a reason that both aren't wrapped by 
 `UnsafeCell<Option>`, partially performance.  
@@ -1187,6 +1220,8 @@ Which means that the requirements for safe-access is only possible if:
 1. Non-modifying access happens after initialization.
 2. Modifying access happens in a non-concurrent context.
 
+---
+
 [UnsafeCell<Option<T>>](https://doc.rust-lang.org/std/cell/struct.UnsafeCell.html) does not contain potentially 
 uninitialized data, the uninitialized state is represented by the `Option`. 
 Safe access only requires that there is no concurrent access (of any kind) at the same time as mutable access. 
@@ -1197,7 +1232,8 @@ the `Mutex`), a slot of type `T` (being the `Mutex`) needs to be provided. There
 `static UnsafeCell<Lock<..>>` which cannot be instantiated at compile-time in the same way that an `UnsafeCell<Option<T>>` 
 can (`static MY_VAR: UnsafeCell<Option<String>> = UnsafeCell::new(None)` for example).  
 
-That is the reason why the variables look like they do.  
+One could make it work anyway, by some wrangling and implementation using `PinInit` but for this project I decided
+not to.  
 
 ##### Global POPS and an unsound API
 
