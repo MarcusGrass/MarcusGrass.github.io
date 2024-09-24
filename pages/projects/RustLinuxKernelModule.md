@@ -1663,7 +1663,7 @@ see that `abcd` is displayed in the terminal.
 Then `echo "defg" > /proc/rust-proc-file && cat /proc/rust-proc-file` and 
 see that only `defg` is displayed in the terminal.
 
-Then `echo "defg" >> /proc/rust-proc-file && cat /proc/rust-proc-file` and 
+Then `echo "abcd" >> /proc/rust-proc-file && cat /proc/rust-proc-file` and 
 see that `defg\nabcd` is displayed in the terminal.  
 
 That's a simple test to cover very basic `open`, `read`, and `write` functionality, 
