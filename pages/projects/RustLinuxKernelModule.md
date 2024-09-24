@@ -39,6 +39,10 @@ with the code which can be followed to the source which also contains its licens
       * [unsafe extern "C" fn](#unsafe-extern-c-fn)
       * [Abstraction](#abstraction)
       * [Better function signatures](#better-function-signatures)
+      * [A safe reference to the `file`-struct](#a-safe-reference-to-the-file-struct)
+        * [Data-races](#data-races)
+        * [An acceptable data race](#an-acceptable-data-race)
+        * [Handling reading racy data for more complex structs](#handling-reading-racy-data-for-more-complex-structs)
       * [Getting to work](#getting-to-work)
         * [User pointers](#user-pointers)
       * [Writing the module](#writing-the-module)
@@ -51,11 +55,14 @@ with the code which can be followed to the source which also contains its licens
         * [MaybeUninit<T> vs UnsafeCell<Option<T>>](#maybeuninitt-vs-unsafecelloptiont)
         * [Global POPS and an unsound API](#global-pops-and-an-unsound-api)
         * [Deallocation](#deallocation)
+  * [Testing](#testing)
+    * [Objective retrospective](#objective-retrospective)
   * [Summing up](#summing-up)
     * [Generating bindings](#generating-bindings-1)
     * [Wrapping the API with reasonable lifetimes](#wrapping-the-api-with-reasonable-lifetimes)
     * [Dealing with static data in a concurrent context](#dealing-with-static-data-in-a-concurrent-context)
     * [Tradeoff between soundness and performance](#tradeoff-between-soundness-and-performance)
+    * [Testing](#testing-)
     * [Shortcomings](#shortcomings)
 <!-- TOC -->
 
@@ -470,6 +477,8 @@ Or even better, since even though the bindings specify a `*mut`, [converting tha
 is likely going to cause UB](https://doc.rust-lang.org/nomicon/aliasing.html), but converting it to 
 an immutable reference is slightly more likely be safe.
 
+Postfix edit: It's definitely not guaranteed to be safe
+
 ```rust
 fn proc_lseek(file: &kernel::bindings::file,
     offset: kernel::bindings::loff_t,
@@ -478,15 +487,253 @@ fn proc_lseek(file: &kernel::bindings::file,
 
 ---
 
-Making a safer abstraction over the bindings struct `file` would be even better, but deemed out of scope, 
+Making a safer abstraction over the bindings struct `file` would be even better, ~~but deemed out of scope, 
 the rust-api now communicates that lseek takes a reference to a file that should not be mutated 
-(it can safely be mutated with synchronization, again out of scope), an offset, and a `Whence`-enum which 
+(it can safely be mutated with synchronization, again out of scope)~~, an offset, and a `Whence`-enum which 
 can only be one of 5 types. 
 
 ---
 
+#### A safe reference to the `file`-struct
+
+When working with unsafe and raw pointers in `Rust` it's easy to get it wrong, it's best to keep `Rust`'s aliasing 
+rules top of mind when trying: 
+> There can only be one mutable reference and no other references to some object, alternatively there can be 
+> however many immutable reference to an object at a given time.
+> The data behind an immutable reference must not change immutably while holding the reference.
+
+What this means in practice is that if an immutable reference is taken to a `file`-struct backed by a pointer 
+that the kernel provides, and that pointer is changed while holding the reference, that's UB.  
+
+There is something to be said about how big of a problem that actually is, it depends on the situation. As a general rule, 
+avoiding UB will save you from a headache now and in the future, so how can the `file`-struct be made safe?
+
+Sometimes the kernel code guarantees operation serialization when reading a file, looking at the handler for 
+the [read syscall](https://man7.org/linux/man-pages/man2/read.2.html) for example [(it's here)](https://github.com/MarcusGrass/linux/blob/mg/proc-fs/fs/read_write.c#L608)
+and looks like this:
+```c
+ssize_t ksys_read(unsigned int fd, char __user *buf, size_t count)
+{
+	struct fd f = fdget_pos(fd);
+	ssize_t ret = -EBADF;
+
+	if (f.file) {
+		loff_t pos, *ppos = file_ppos(f.file);
+		if (ppos) {
+			pos = *ppos;
+			ppos = &pos;
+		}
+		ret = vfs_read(f.file, buf, count, ppos);
+		if (ret >= 0 && ppos)
+			f.file->f_pos = pos;
+		fdput_pos(f);
+	}
+	return ret;
+}
+SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
+{
+	return ksys_read(fd, buf, count);
+}
+```
+
+A process can enter this syscall-handler with (theoretically) limitless concurrency.  
+
+`vfs_read` will call the `proc_open`-handler that was defined, both with a pointer to the `file`, and 
+a pointer to the `file`'s offset-field. That means that if `Rust`-code is holding a reference to the file
+and mutating the pointer at the same time, that's UB (oops).  
+
+There's a way of sidestepping this issue, working directly with the pointer:
+
+```rust
+pub struct ProcOpFileHandle(core::ptr::NonNull<kernel::bindings::file>);
+
+impl ProcOpFileHandle {
+    /// Gets the file flags
+    pub fn get_flags(&self) -> core::ffi::c_uint {
+        unsafe {
+            // Safety: flags are only set on open, any time
+            // code gets here it's not going to be modified anymore
+            let flags_offset = offset_of!(kernel::bindings::file, f_flags);
+            self.0
+                .cast::<u8>()
+                .add(flags_offset)
+                .cast::<core::ffi::c_uint>()
+                .read()
+        }
+    }
+
+    fn pos_ptr(&self) -> core::ptr::NonNull<kernel::bindings::loff_t> {
+        unsafe {
+            let pos_offset = offset_of!(kernel::bindings::file, f_pos);
+            self.0
+                .cast::<u8>()
+                .add(pos_offset)
+                .cast::<kernel::bindings::loff_t>()
+        }
+    }
+
+    /// Reading the position is inescapably subject to raciness.  
+    /// The kernel will, on this file-pointer, update position after each read and write,
+    /// see ksys_read, ksys_write at read_write.c.  
+    /// If the file is opened with f_mode `FMODE_ATOMIC_POS`, the proc-function is run under
+    /// a pos-lock if needed, in which case this is safe from data-races.  
+    /// Which means its up to the user to make sure concurrent read-writes doesn't happen if
+    /// they want the offset to make sense.
+    /// # Safety:
+    /// This number may or may not make any sense, bounds checking is still necessary
+    /// to retain safety
+    pub unsafe fn read_pos_unsync(&self) -> kernel::bindings::loff_t {
+        unsafe { self.pos_ptr().read() }
+    }
+
+    /// Same raciness problems as [`Self::read_pos_unsync`].
+    /// # Safety:
+    /// This number may or may not make any sense, bounds checking is still necessary
+    /// to retain safety
+    pub unsafe fn write_pos_unsync(&self, offset: loff_t) {
+        unsafe {
+            self.pos_ptr().write(offset);
+        }
+    }
+}
+```
+
+In this case the `Rust`-code does not take any reference, and thus side-steps the aliasing-problems completely, 
+instead using pointer-arithmetic to find the correct field on the `file`-struct, and reading that directly.  
+
+##### Data-races
+
+If the comments were read another problem has now become apparent, there's a data-race if there isn't exclusive access 
+to the pos-pointer.  
+
+Looking back at the `C`-code: 
+
+In `ksys_read` `fdget_pos(fd)` was [invoked here](https://github.com/MarcusGrass/linux/blob/mg/proc-fs/fs/read_write.c#L610).
+
+`fdget_pos` looks like this:
+
+```c
+static inline struct fd fdget_pos(int fd)
+{
+	return __to_fd(__fdget_pos(fd));
+}
+```
+
+It proxies the call to `__fdget_pos` and then converts the result to an `fd`.
+
+`__fdget_pos` is defined [here in file.c](https://github.com/MarcusGrass/linux/blob/mg/proc-fs/fs/file.c#L1180)
+
+```c
+unsigned long __fdget_pos(unsigned int fd)
+{
+	unsigned long v = __fdget(fd);
+	struct file *file = (struct file *)(v & ~3);
+
+	if (file && file_needs_f_pos_lock(file)) {
+		v |= FDPUT_POS_UNLOCK;
+		mutex_lock(&file->f_pos_lock);
+	}
+	return v;
+}
+```
+
+The code implies that sometimes a `file` is determined to need a `pos_lock`, digging into 
+`file_needs_f_pos_lock` that's defined [here](https://github.com/MarcusGrass/linux/blob/mg/proc-fs/fs/file.c#L1174): 
+
+```c
+/*
+ * Try to avoid f_pos locking. We only need it if the
+ * file is marked for FMODE_ATOMIC_POS, and it can be
+ * accessed multiple ways.
+ *
+ * Always do it for directories, because pidfd_getfd()
+ * can make a file accessible even if it otherwise would
+ * not be, and for directories this is a correctness
+ * issue, not a "POSIX requirement".
+ */
+static inline bool file_needs_f_pos_lock(struct file *file)
+{
+	return (file->f_mode & FMODE_ATOMIC_POS) &&
+		(file_count(file) > 1 || file->f_op->iterate_shared);
+}
+```
+
+In short: If the `file` has `f_mode` `FMODE_ATOMIC_POS`, and (there are multiple open handles or 
+the `file` has the file operation `iterate_shared` defined), then the `pos` will be locked.  
+
+The kernel generally doesn't mess with the flags, they are set by the user, so there is no guarantee that 
+the `file`'s `pos` won't be shared while the `Rust`-code is using it.
+
+##### An acceptable data race
+
+In practice, for the `pos`-field, this means that when reading to it, the `Rust`-code may get an old-value, 
+or worse, an incomplete or unexpected value, it's undefined.  
+
+That issue cannot be worked around, and in some cases, directly reading the value would be UB, 
+for example if the `Rust`-code expects a struct where all bit-patterns aren't valid.
+
+In the case of the `proc`-handler, and `pos`-field, the `Rust`-code is trying to read an `loff_t` which on 
+`x86_64` is an `i64`, but on other platforms it's an equally simple number.  
+
+`loff_t` is valid for all bit-patterns, so reading it is not UB by itself, it's correctly initialized memory, 
+but the value of it may be garbage.  
+
+As the above `Rust`-code comments describe, the read value shall never be trusted and always be subject to 
+validation, the reading itself is `safe`, but the function is marked `unsafe` anyway to make that fact extra clear.  
+
+##### Handling reading racy data for more complex structs
+
+Since reading `pos` from `file` happened to be simple, ways of handling more complex cases wasn't explained.
+Shortly, if `Rust`-code wants to read some struct from a pointer that could contain any bit-pattern, and the 
+struct cannot tolerate any bit-pattern, the programmer would need to read into something else first.
+
+```rust
+use std::ptr::NonNull;
+
+struct MyStruct {
+  field_a: Inner,
+  field_b: OtherThing,
+}
+
+/// # Safety
+unsafe fn read_my_struct_from_pointer(ptr: *mut MyStruct) -> Option<MyStruct> {
+  // Comp-time size of the struct in bytes
+  const LEN: usize = core::mem::size_of::<MyStruct>();
+  // Zeroed byte-array that can hold that number of bytes
+  let mut bytes = [0u8; LEN];
+  let byte_ptr = (&mut bytes) as *mut u8;
+  // Copy the raw data into the byte-array
+  ptr.cast::<u8>()
+          .copy_to_nonoverlapping(byte_ptr, LEN);
+  // Validate that the data is well-formed
+  MyStruct::try_from_bytes(bytes);
+}
+```
+
+That may look trivial, but implementing `try_from_bytes` is where memory-layout-requirements have to be checked, 
+there are crates for that, like [bytemuck](https://docs.rs/bytemuck/latest/bytemuck/), if encountering that 
+kind of situation, looking into that is recommended.  
+
+---
+
+Now the signature looks like this:
+
+```rust
+unsafe fn plseek(
+    file: &mut ProcOpFileHandle,
+    offset: kernel::bindings::loff_t,
+    whence: Whence,
+) -> Result<kernel::bindings::loff_t>;
+```
+
+There's a mutable reference to `ProcOpFileHandle` which wraps a raw `file`-pointer. 
+It's marked as mutable to prevent race-conditions by shared modifications, they are inescapable since 
+the inner pointer is shared with `C`-code, but there's no reason to make a bad problem worse.
+
+---
+
 Continuing, something needs to wrap this `Rust`-function, validate that `Whence` can be converted from the provided `int` 
-from the `C`-style function, and check that the file-pointer is non-null, turn it into a reference, and lastly handle 
+from the `C`-style function, check that the file-pointer is non-null and create a `ProcOpsFileHandle`, and lastly handle 
 the `Result`. 
 
 Here's an example of how that could look: 
@@ -498,22 +745,18 @@ unsafe extern "C" fn proc_lseek(
     offset: kernel::bindings::loff_t,
     whence: core::ffi::c_int,
 ) -> kernel::bindings::loff_t {
-    // Take the `c_int` and Convert to a `Whence`-enum, return an error if invalid
     let Ok(whence_u32) = u32::try_from(whence) else {
         return EINVAL.to_errno().into();
     };
     let Ok(whence) = Whence::try_from(whence_u32) else {
         return EINVAL.to_errno().into();
     };
-    // Take the file-pointer, convert to a reference if not null
-    let file_ref = unsafe {
-        let Some(file_ref) = file.as_ref() else {
-            return EINVAL.to_errno().into();
-        };
-        file_ref
+    let mut file_ref = if let Some(ptr) = core::ptr::NonNull::new(file) {
+        ProcOpFileHandle(ptr)
+    } else {
+        return EINVAL.to_errno().into();
     };
-    // Execute the rust-function `T:LSEEK` with the converted arguments, and return the result, or error as an errno
-    match (T::LSEEK)(file_ref, offset, whence) {
+    match (T::LSEEK)(&mut file_ref, offset, whence) {
         core::result::Result::Ok(offs) => offs,
         core::result::Result::Err(e) => {
             return e.to_errno().into();
@@ -594,13 +837,15 @@ It's a struct containing a bunch of optional function-pointers. Here's what it l
 
 ```rust
 /// Type alias for open function signature
-pub type ProcOpen<'a> = &'a dyn Fn(&inode, &file) -> Result<i32>;
+pub type ProcOpen<'a> = &'a dyn Fn(&mut ProcOpFileHandle) -> Result<i32>;
 /// Type alias for read function signature
-pub type ProcRead<'a> = &'a dyn Fn(&file, UserSliceWriter, &loff_t) -> Result<(usize, usize)>;
+pub type ProcRead<'a> =
+&'a dyn Fn(&mut ProcOpFileHandle, UserSliceWriter, loff_t) -> Result<(usize, usize)>;
 /// Type alias for write function signature
-pub type ProcWrite<'a> = &'a dyn Fn(&file, UserSliceReader, &loff_t) -> Result<(usize, usize)>;
+pub type ProcWrite<'a> =
+&'a dyn Fn(&mut ProcOpFileHandle, UserSliceReader, loff_t) -> Result<(usize, usize)>;
 /// Type alias for lseek function signature
-pub type ProcLseek<'a> = &'a dyn Fn(&file, loff_t, Whence) -> Result<loff_t>;
+pub type ProcLseek<'a> = &'a dyn Fn(&mut ProcOpFileHandle, loff_t, Whence) -> Result<loff_t>;
 
 /// Proc file ops handler
 pub trait ProcHandler<'a> {
@@ -618,14 +863,14 @@ pub trait ProcHandler<'a> {
 /// the kernel expects into Rust-functions with a few more helpful types.
 pub struct ProcOps<'a, T>
 where
-    T: ProcHandler<'a>,
+    T: ProcHandler<'static>,
 {
     ops: bindings::proc_ops,
     _pd: PhantomData<&'a T>,
 }
 impl<'a, T> ProcOps<'a, T>
 where
-    T: ProcHandler<'a>,
+    T: ProcHandler<'static>,
 {
     /// Create new ProcOps from a handler and flags
     pub const fn new(proc_flags: u32) -> Self {
@@ -706,7 +951,7 @@ pub fn proc_create<'a, T>(
     proc_ops: &'a ProcOps<'a, T>,
 ) -> Result<ProcDirEntry<'a>>
 where
-    T: ProcHandler<'a>,
+    T: ProcHandler<'static>,
 {
     // ProcOps contains the c-style struct, give the kernel a pointer to the address of that struct
     let pops = core::ptr::addr_of!(proc_ops.ops);
@@ -751,29 +996,28 @@ impl ProcHandler<'static> for ProcHand {
     const LSEEK: kernel::proc_fs::ProcLseek<'static> = &plseek;
 }
 
-#[inline]
-fn popen(_inode: &kernel::bindings::inode, _file: &kernel::bindings::file) -> Result<i32> {
+unsafe fn popen(file: &mut ProcOpFileHandle) -> Result<i32> {
     Ok(0)
 }
 
-fn pread(
-    _file: &kernel::bindings::file,
+unsafe fn pread(
+    _file: &mut ProcOpFileHandle,
     mut user_slice: UserSliceWriter,
-    offset: &kernel::bindings::loff_t,
+    offset: kernel::bindings::loff_t,
 ) -> Result<(usize, usize)> {
     ...
 }
 
-fn pwrite(
-    file: &kernel::bindings::file,
+unsafe fn pwrite(
+    file: &mut ProcOpFileHandle,
     user_slice_reader: UserSliceReader,
-    offset: &kernel::bindings::loff_t,
+    offset: kernel::bindings::loff_t,
 ) -> Result<(usize, usize)> {
     ...
 }
 
-fn plseek(
-    file: &kernel::bindings::file,
+unsafe fn plseek(
+    file: &mut ProcOpFileHandle,
     offset: kernel::bindings::loff_t,
     whence: Whence,
 ) -> Result<kernel::bindings::loff_t> {
@@ -836,7 +1080,9 @@ data, then the kernel needs to write data), and passes that into the module's su
 Which again, has a signature that looks like this: 
 
 ```rust
-pub type ProcRead<'a> = &'a dyn Fn(&file, UserSliceWriter, &loff_t) -> Result<(usize, usize)>;
+pub type ProcRead<'a> =
+&'a dyn Fn(&mut ProcOpFileHandle, UserSliceWriter, loff_t) -> Result<(usize, usize)>;
+
 ```
 
 ---
@@ -1042,7 +1288,7 @@ fn init(_module: &'static ThisModule) -> Result<Self> {
         // `init_data` has been called, but could theoretically be invoked in a safe context before
         // then, so don't, it's ordered like this for a reason.
         impl ProcHandler<'static> for ProcHand {
-            const OPEN: kernel::proc_fs::ProcOpen<'static> = &Self::popen;
+            const OPEN: kernel::proc_fs::ProcOpen<'static> = &|f| unsafe { Self::popen(f) };
 
             const READ: kernel::proc_fs::ProcRead<'static> =
                 &|f, u, o| unsafe { Self::pread(f, u, o) };
@@ -1308,7 +1554,7 @@ fn init(_module: &'static ThisModule) -> Result<Self> {
         // `init_data` has been called, but could theoretically be invoked in a safe context before
         // then, so don't, it's ordered like this for a reason.
         impl ProcHandler<'static> for ProcHand {
-            const OPEN: kernel::proc_fs::ProcOpen<'static> = &Self::popen;
+            const OPEN: kernel::proc_fs::ProcOpen<'static> = &|f| unsafe { Self::popen(f) };
 
             const READ: kernel::proc_fs::ProcRead<'static> =
                 &|f, u, o| unsafe { Self::pread(f, u, o) };
@@ -1393,6 +1639,43 @@ After that, a reference to the initialized data is taken, and the mutex is acces
 With that, all runtime-created data is removed, the only thing that may remain are function pointers which were static 
 anyway, and accessing them will produce a safe error.  
 
+## Testing
+
+Now that the module is 'complete', how can it be tested, and what is needed for testing?
+
+### Objective retrospective
+
+The objective was to write a `proc`-file that functions as a regular `file` with memory in `RAM`.  
+It should handle `open`, `read`, `write`, and `lseek`.  
+
+A simple way of testing is to `modprobe rust_proc_ram_file && cat /proc/rust-proc-file`. 
+See that nothing is there.
+
+Then `echo "abcd" > /proc/rust-proc-file && cat /proc/rust-proc-file` and 
+see that `abcd` is displayed in the terminal. 
+
+Then `echo "defg" > /proc/rust-proc-file && cat /proc/rust-proc-file` and 
+see that only `defg` is displayed in the terminal.
+
+Then `echo "defg" >> /proc/rust-proc-file && cat /proc/rust-proc-file` and 
+see that `defg\nabcd` is displayed in the terminal.  
+
+That's a simple test to cover very basic `open`, `read`, and `write` functionality, 
+but no concurrency or `seeking`.  
+
+I wrote this small tester that will: 
+
+1. Check opening the file with different open-options (like `trucate` truncates the file).  
+2. Check reading and writing. 
+3. Check writing, seeking, and reading.
+4. Check writing, seeking, and overwriting.
+5. Check writing concurrently, and then reading.
+6. Check writing concurrently while the module is unloaded/reloaded.  
+
+If this was a serious module that should be shipped to users, then further testing 
+of edge-conditions, weird user inputs, and fuzzing would be appropriate, but 
+for a simple demo-module that will have to be enough.  
+
 ## Summing up
 
 All important parts are now covered, the actual implementation of `pread`, `pwrite`, `plseek`, is fairly boring 
@@ -1426,17 +1709,21 @@ regular `const <VAR>`.
 Lastly, there was a tradeoff where some functions were arbitrarily marked as safe, even though they are unsafe under 
 same conditions. Whether that tradeoff is justified is up to the programmer.  
 
+### Testing 
+
+Some tests were created and run to ensure 
+
 ### Shortcomings
 
 There are a few things that should be fixed up to make this module properly safe.
 
-1. Make sure that the `*file` can be turned into an immutable reference, or better yet, 
+1. ~~Make sure that the `*file` can be turned into an immutable reference, or better yet, 
 create a `Rust`-abstraction for it. It itself contains locks, and data that is safe to mutate 
 behind those locks. For it to safely be an immutable reference, that data must not be changed
 while holding the immutable reference, with or without the lock, since the data isn't modeled
 to be guarded, from `Rust`'s point of vue that immutable data changed when we promised not to.
 That can't happen from `Rust`-code because of the immutable reference, but if `C`-code changes it
-that's UB.
+that's UB.~~
 2. Make the module-api sound by implementing or using `PinInit` in such a way that an
 `static UnsafeCell<Option<..>>` can be used instead of a `static mut MaybeUninit`, 
 there should be no performance hit if using `unwrap_unchecked` on the option anyway, it's just
