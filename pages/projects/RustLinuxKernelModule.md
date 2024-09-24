@@ -27,36 +27,38 @@ with the code which can be followed to the source which also contains its licens
   * [Introduction](#introduction)
   * [Table of contents](#table-of-contents)
   * [Objective](#objective)
-    * [The proc Filesystem](#the-proc-filesystem)
-      * [A proc 'file'](#a-proc-file)
-      * [The proc API](#the-proc-api)
-      * [proc_open](#proc_open)
-      * [proc_read](#proc_read)
-      * [proc_write](#proc_write)
-      * [proc_lseek](#proc_lseek)
-    * [Implementing it in Rust](#implementing-it-in-rust)
-      * [Generating bindings](#generating-bindings)
-      * [unsafe extern "C" fn](#unsafe-extern-c-fn)
-      * [Abstraction](#abstraction)
-      * [Better function signatures](#better-function-signatures)
-      * [A safe reference to the `file`-struct](#a-safe-reference-to-the-file-struct)
-        * [Data-races](#data-races)
-        * [An acceptable data race](#an-acceptable-data-race)
-        * [Handling reading racy data for more complex structs](#handling-reading-racy-data-for-more-complex-structs)
-      * [Getting to work](#getting-to-work)
-        * [User pointers](#user-pointers)
-      * [Writing the module](#writing-the-module)
-      * [Mutex](#mutex)
-      * [Storing the ProcDirEntry](#storing-the-procdirentry)
-      * [Memory lifecycle, you, me, and `C`](#memory-lifecycle-you-me-and-c)
-        * [A user interaction](#a-user-interaction)
-        * [Constraints caused by `'static`-lifetimes](#constraints-caused-by-static-lifetimes)
-        * [Using static data for the backing storage](#using-static-data-for-the-backing-storage)
-        * [MaybeUninit<T> vs UnsafeCell<Option<T>>](#maybeuninitt-vs-unsafecelloptiont)
-        * [Global POPS and an unsound API](#global-pops-and-an-unsound-api)
-        * [Deallocation](#deallocation)
+  * [The proc Filesystem](#the-proc-filesystem)
+    * [A proc 'file'](#a-proc-file)
+    * [The proc API](#the-proc-api)
+    * [proc_open](#proc_open)
+    * [proc_read](#proc_read)
+    * [proc_write](#proc_write)
+    * [proc_lseek](#proc_lseek)
+  * [Implementing it in Rust](#implementing-it-in-rust)
+    * [Generating bindings](#generating-bindings)
+    * [unsafe extern "C" fn](#unsafe-extern-c-fn)
+    * [Abstraction](#abstraction)
+    * [Better function signatures](#better-function-signatures)
+    * [A safe reference to the `file`-struct](#a-safe-reference-to-the-file-struct)
+      * [Data-races](#data-races)
+      * [An acceptable data race](#an-acceptable-data-race)
+      * [Handling reading racy data for more complex structs](#handling-reading-racy-data-for-more-complex-structs)
+    * [Continuing the abstraction](#continuing-the-abstraction)
+    * [Using the abstraction](#using-the-abstraction)
+      * [User pointers](#user-pointers)
+    * [Writing the module](#writing-the-module)
+    * [Mutex](#mutex)
+    * [Storing the ProcDirEntry](#storing-the-procdirentry)
+    * [Memory lifecycle, you, me, and `C`](#memory-lifecycle-you-me-and-c)
+      * [A user interaction](#a-user-interaction)
+      * [Constraints caused by `'static`-lifetimes](#constraints-caused-by-static-lifetimes)
+      * [Using static data for the backing storage](#using-static-data-for-the-backing-storage)
+      * [MaybeUninit<T> vs UnsafeCell<Option<T>>](#maybeuninitt-vs-unsafecelloptiont)
+      * [Global POPS and an unsound API](#global-pops-and-an-unsound-api)
+      * [Deallocation](#deallocation)
   * [Testing](#testing)
     * [Objective retrospective](#objective-retrospective)
+    * [Implementing tests](#implementing-tests)
   * [Summing up](#summing-up)
     * [Generating bindings](#generating-bindings-1)
     * [Wrapping the API with reasonable lifetimes](#wrapping-the-api-with-reasonable-lifetimes)
@@ -79,7 +81,7 @@ Sadly, that's still the case, so I had to contrive something: A proc-file that w
 
 ---
 
-### The proc Filesystem
+## The proc Filesystem
 
 The stated purpose of the `/proc` filesystem is to "provide information about the running Linux System", read 
 more about it [here](https://www.kernel.org/doc/html/latest/filesystems/proc.html).  
@@ -90,7 +92,7 @@ used the purpose of this module doesn't quite fit it, but for simplicity I chose
 
 ---
 
-#### A proc 'file'
+### A proc 'file'
 
 Proc files can be created by the kernel's `proc_fs`-api, it lives [here](https://github.com/Rust-for-Linux/linux/blob/e31f0a57ae1ab2f6e17adb8e602bc120ad722232/include/linux/proc_fs.h).
 Proc files are not like the most commonly imagined regular file, some data that exists on a disk somewhere, 
@@ -113,7 +115,7 @@ That interface is provided through the last argument `...,proc_ops *proc_ops);..
 
 ---
 
-#### The proc API
+### The proc API
 
 The proc API, as exposed through the `proc_ops`-struct:
 
@@ -147,7 +149,7 @@ The functions that will be implemented follows.
 
 ---
 
-#### proc_open
+### proc_open
 
 When a user tries to `open` the proc-file, the handler `int	(*proc_open)(struct inode *, struct file *);` 
 will be invoked.  
@@ -173,7 +175,7 @@ Read some more about the [file structure here](https://www.oreilly.com/library/v
 or check out its definition [here](https://github.com/Rust-for-Linux/linux/blob/e31f0a57ae1ab2f6e17adb8e602bc120ad722232/include/linux/fs.h#L992).  
 ---
 
-#### proc_read
+### proc_read
 
 Now onto some logic, when a user wants to read from the file 
 it provides a buffer and an offset pointer, the signature looks like 
@@ -192,7 +194,7 @@ bytes written, and update the offset through the pointer.
 
 ---
 
-#### proc_write
+### proc_write
 
 When a user tries to write to the file, it enters through 
 [proc_write](https://github.com/Rust-for-Linux/linux/blob/e31f0a57ae1ab2f6e17adb8e602bc120ad722232/include/linux/proc_fs.h#L34),
@@ -209,7 +211,7 @@ The kernel should write data from the user buffer into the backing storage.
 
 ---
 
-#### proc_lseek
+### proc_lseek
 
 Lastly, if the file is to be seekable to an offset [proc_lseek](https://github.com/Rust-for-Linux/linux/blob/e31f0a57ae1ab2f6e17adb8e602bc120ad722232/include/linux/proc_fs.h#L36)
 has to be implemented.
@@ -230,13 +232,13 @@ Assuming that the offset makes sense, the module should return the new offset.
 
 ---
 
-### Implementing it in Rust
+## Implementing it in Rust
 
 That's it, with those 4 functions implemented there should be a fairly complete working 
 file created when the functions are passed as members of the `proc_ops`-struct, time to start!
 
 
-#### Generating bindings
+### Generating bindings
 
 Rust for Linux uses Rust-bindings generated from the kernel headers. 
 They're conveniently added when building, as long as the correct headers are 
@@ -244,7 +246,7 @@ added [here](https://github.com/MarcusGrass/linux/blob/8e8c948133ca1a0cbf8f8add1
 for this module only `proc_fs.h` is needed.  
 
 
-#### unsafe extern "C" fn
+### unsafe extern "C" fn
 
 Since `Rust` is compatible with `C` by jumping through some hoops, 
 theoretically the module could be implemented by just using the C-api 
@@ -306,7 +308,7 @@ think more about that, the problem solved itself.
 
 ---
 
-#### Abstraction
+### Abstraction
 
 As mentioned previously, a strength of `Rust`'s is being able to 
 abstract away `unsafety`, ideally an API would consist of `Rust` function-signatures 
@@ -416,7 +418,7 @@ code is having the function connected to a struct, but using that, better abstra
 
 ---
 
-#### Better function signatures
+### Better function signatures
 
 Looking again at the function pointer that will be invoked for `lseek`:
 ```rust
@@ -494,7 +496,7 @@ can only be one of 5 types.
 
 ---
 
-#### A safe reference to the `file`-struct
+### A safe reference to the `file`-struct
 
 When working with unsafe and raw pointers in `Rust` it's easy to get it wrong, it's best to keep `Rust`'s aliasing 
 rules top of mind when trying: 
@@ -601,7 +603,7 @@ impl ProcOpFileHandle {
 In this case the `Rust`-code does not take any reference, and thus side-steps the aliasing-problems completely, 
 instead using pointer-arithmetic to find the correct field on the `file`-struct, and reading that directly.  
 
-##### Data-races
+#### Data-races
 
 If the comments were read another problem has now become apparent, there's a data-race if there isn't exclusive access 
 to the pos-pointer.  
@@ -664,7 +666,7 @@ the `file` has the file operation `iterate_shared` defined), then the `pos` will
 The kernel generally doesn't mess with the flags, they are set by the user, so there is no guarantee that 
 the `file`'s `pos` won't be shared while the `Rust`-code is using it.
 
-##### An acceptable data race
+#### An acceptable data race
 
 In practice, for the `pos`-field, this means that when reading to it, the `Rust`-code may get an old-value, 
 or worse, an incomplete or unexpected value, it's undefined.  
@@ -681,7 +683,7 @@ but the value of it may be garbage.
 As the above `Rust`-code comments describe, the read value shall never be trusted and always be subject to 
 validation, the reading itself is `safe`, but the function is marked `unsafe` anyway to make that fact extra clear.  
 
-##### Handling reading racy data for more complex structs
+#### Handling reading racy data for more complex structs
 
 Since reading `pos` from `file` happened to be simple, ways of handling more complex cases wasn't explained.
 Shortly, if `Rust`-code wants to read some struct from a pointer that could contain any bit-pattern, and the 
@@ -731,6 +733,8 @@ It's marked as mutable to prevent race-conditions by shared modifications, they 
 the inner pointer is shared with `C`-code, but there's no reason to make a bad problem worse.
 
 ---
+
+### Continuing the abstraction
 
 Continuing, something needs to wrap this `Rust`-function, validate that `Whence` can be converted from the provided `int` 
 from the `C`-style function, check that the file-pointer is non-null and create a `ProcOpsFileHandle`, and lastly handle 
@@ -978,7 +982,7 @@ where
 
 ---
 
-#### Getting to work
+### Using the abstraction
 
 Now it's time to use the abstraction, it looks like this:
 
@@ -1028,7 +1032,7 @@ unsafe fn plseek(
 
 ---
 
-##### User pointers
+#### User pointers
 
 Oh right, the `__user`-part.  
 
@@ -1087,7 +1091,7 @@ pub type ProcRead<'a> =
 
 ---
 
-#### Writing the module
+### Writing the module
 
 The module is defined by this convenient `module!`-macro:
 
@@ -1129,7 +1133,7 @@ There's a need for shared mutable state and that's where this gets tricky.
 
 ---
 
-#### Mutex
+### Mutex
 
 One of the simplest ways of creating (simplest by mental model at least) is by wrapping the state with a mutual-exclusion
 lock, a `Mutex`.  
@@ -1237,7 +1241,7 @@ Now There's an initialized `Mutex`.
 
 ---
 
-#### Storing the ProcDirEntry
+### Storing the ProcDirEntry
 
 Now `proc_create` can be called which will create a `proc`-file. 
 
@@ -1348,7 +1352,7 @@ into why that it is, and what the trade-offs of having some `unsoundness` is.
 
 ---
 
-#### Memory lifecycle, you, me, and `C`
+### Memory lifecycle, you, me, and `C`
 
 Again, the C-api looks like this:
 
@@ -1390,7 +1394,7 @@ lifecycle of an interaction.
 
 ---
 
-##### A user interaction
+#### A user interaction
 
 A user wants to open the file, by name.
 
@@ -1428,7 +1432,7 @@ const OPEN: kernel::proc_fs::ProcOpen<'static> = &Self::popen;
 
 ---
 
-##### Constraints caused by `'static`-lifetimes
+#### Constraints caused by `'static`-lifetimes
 
 Static (sloppily expressed) means 'for the duration of the program', if there's a `'static`-requirement for a variable 
 it means that that variable needs its memory to be allocated in the binary. 
@@ -1462,7 +1466,7 @@ the `data`-section.
 
 ---
 
-##### Using static data for the backing storage
+#### Using static data for the backing storage
 
 Looking back at the purpose of the module, data needs to be stored with a static lifetime, there are multiple ways 
 to achieve this in `Rust`, the data can be owned directly, like a member of the module `RustProcRamFile`. 
@@ -1507,7 +1511,7 @@ the binary for the data it will contain, on module-initialization data will be w
 Same goes for `Entry`, `UnsafeCell` does essentially the same thing, there's a reason that both aren't wrapped by 
 `UnsafeCell<Option>`, partially performance.  
 
-##### MaybeUninit<T> vs UnsafeCell<Option<T>>
+#### MaybeUninit<T> vs UnsafeCell<Option<T>>
 
 [MaybeUninit<T>](https://doc.rust-lang.org/std/mem/union.MaybeUninit.html) contains potentially uninitialized data.
 Accessing that data, by for example creating a reference to it, is UB if that data is not yet initialized.  
@@ -1530,7 +1534,7 @@ can (`static MY_VAR: UnsafeCell<Option<String>> = UnsafeCell::new(None)` for exa
 One could make it work anyway, by some wrangling and implementation using `PinInit` but for this project I decided
 not to.  
 
-##### Global POPS and an unsound API
+#### Global POPS and an unsound API
 
 Back again to POPS, the `init`-function and unsoundness:
 
@@ -1596,7 +1600,7 @@ or having to be maintained by someone else. In that case opting for soundness ma
 'window' for creating UB here is quite slim.  
 
 
-##### Deallocation
+#### Deallocation
 
 Finally, the data is set up, and can be used with some constraints, now the teardown.  
 
@@ -1647,6 +1651,8 @@ Now that the module is 'complete', how can it be tested, and what is needed for 
 
 The objective was to write a `proc`-file that functions as a regular `file` with memory in `RAM`.  
 It should handle `open`, `read`, `write`, and `lseek`.  
+
+### Implementing tests
 
 A simple way of testing is to `modprobe rust_proc_ram_file && cat /proc/rust-proc-file`. 
 See that nothing is there.
