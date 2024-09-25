@@ -1,4 +1,4 @@
-# Rust for Linux, how hard is it to write a Kernel module in Rust at present?
+# Rust for Linux, how hard is it to write a Kernel module in Rust?
 
 Once again I'm back on parental leave, I've been lazily following the [Rust for Linux](https://rust-for-linux.com/) 
 effort but finally decided to get into it and write a simple kernel module in `Rust`.
@@ -8,12 +8,13 @@ effort but finally decided to get into it and write a simple kernel module in `R
 ## Introduction
 
 This write-up is about writing a kernel module in `Rust` which will expose a file under `/proc/rust-proc-file`, 
-the file is going to function as a regular file, but backed by pure ram.  
+the file is going to function as a regular file, but backed by just ram.  
 
-It'll go through zero-cost abstractions and how one can safely wrap `unsafe extern "C" fn`'s hiding away 
+It'll go through zero-cost abstractions and how one can safely wrap `unsafe extern "C" fn`s hiding away 
 the gritty details of `C`-APIs.
 
-It'll also go through numerous ways of causing and avoiding UB, as well as some kernel internals.  
+It'll also go through numerous ways of causing and avoiding [undefined behaviour (UB)](https://doc.rust-lang.org/reference/behavior-considered-undefined.html)
+, as well as some kernel internals.  
 
 This write-up is code-heavy, all code shown is licensed under GPLv2 and generally there are links 
 with the code which can be followed to the source which also contains its license.  
@@ -23,7 +24,7 @@ with the code which can be followed to the source which also contains its licens
 ## Table of contents
 
 <!-- TOC -->
-* [Rust for Linux, how hard is it to write a Kernel module in Rust at present?](#rust-for-linux-how-hard-is-it-to-write-a-kernel-module-in-rust-at-present)
+* [Rust for Linux, how hard is it to write a Kernel module in Rust?](#rust-for-linux-how-hard-is-it-to-write-a-kernel-module-in-rust)
   * [Introduction](#introduction)
   * [Table of contents](#table-of-contents)
   * [Objective](#objective)
@@ -43,7 +44,8 @@ with the code which can be followed to the source which also contains its licens
       * [Data-races](#data-races)
       * [An acceptable data race](#an-acceptable-data-race)
       * [Handling reading racy data for more complex structs](#handling-reading-racy-data-for-more-complex-structs)
-    * [Continuing the abstraction](#continuing-the-abstraction)
+    * [Back to abstracting](#back-to-abstracting)
+    * [Wrapping the `unsafe extern "C" fn`](#wrapping-the-unsafe-extern-c-fn)
     * [Using the abstraction](#using-the-abstraction)
       * [User pointers](#user-pointers)
     * [Writing the module](#writing-the-module)
@@ -83,12 +85,14 @@ Sadly, that's still the case, so I had to contrive something: A proc-file that w
 
 ## The proc Filesystem
 
-The stated purpose of the `/proc` filesystem is to "provide information about the running Linux System", read 
-more about it [here](https://www.kernel.org/doc/html/latest/filesystems/proc.html).  
+The stated purpose of the `/proc` filesystem is to 
+>provide information about the running Linux System
+
+read more about it [here](https://www.kernel.org/doc/html/latest/filesystems/proc.html).  
 
 On a Linux machine with the `/proc` filesystem you can find process information e.g. under `/proc/<pid>/..`, 
 like memory usage, mounts, cpu-usage, fds, etc. With the above stated purpose and how the `/proc` filesystem is 
-used the purpose of this module doesn't quite fit it, but for simplicity I chose `proc` anyway.
+used, the purpose of this module doesn't quite fit it, but for simplicity I chose `proc` anyway.  
 
 ---
 
@@ -107,7 +111,7 @@ struct proc_dir_entry *proc_create(const char *name, umode_t mode, struct proc_d
 
 When invoked with correct arguments it will create a file under `/proc/<name>` (if no parent is provided).  
 
-That file is an interface to the kernel, a pseudo-file where the user interacts with it as a regular file on one end, 
+That `file` is an interface to the kernel, a user interacts with it as a regular file on one end, 
 and the kernel provides handlers for regular file-functionality on the other end (like `open`, `read`, `write`, `lseek`, 
 etc.).  
 
@@ -171,7 +175,7 @@ It just returns `0` for success.
 There are cases where one would like to do something when the file is opened, in that case, 
 the `*file`-pointer could be modified, for example by editing the `void *private_data`-field to add some data 
 that will follow the file through its coming operations. 
-Read some more about the [file structure here](https://www.oreilly.com/library/view/linux-device-drivers/0596000081/ch03s04.html), 
+Read more about the [file structure here](https://www.oreilly.com/library/view/linux-device-drivers/0596000081/ch03s04.html), 
 or check out its definition [here](https://github.com/Rust-for-Linux/linux/blob/e31f0a57ae1ab2f6e17adb8e602bc120ad722232/include/linux/fs.h#L992).  
 ---
 
@@ -298,7 +302,7 @@ One difference between these `C`-style function declarations and something
 like `Rust`'s [`Fn`-traits](https://doc.rust-lang.org/std/ops/trait.Fn.html) 
 is that these function cannot capture any state.  
 
-This necessitates using global-static for persistent state that has to 
+This necessitates using global-statics for persistent state that has to 
 be shared between user-calls into the proc-file (like writing to the backing file data).
 For modifications that do not have to be shared or persisted after the interaction ends
 , the `file`'s private data could be used.  
@@ -479,7 +483,7 @@ Or even better, since even though the bindings specify a `*mut`, [converting tha
 is likely going to cause UB](https://doc.rust-lang.org/nomicon/aliasing.html), but converting it to 
 an immutable reference is slightly more likely be safe.
 
-Postfix edit: It's definitely not guaranteed to be safe
+Postfix edit: It's definitely not guaranteed to be safe (more on that below).  
 
 ```rust
 fn proc_lseek(file: &kernel::bindings::file,
@@ -492,7 +496,7 @@ fn proc_lseek(file: &kernel::bindings::file,
 Making a safer abstraction over the bindings struct `file` would be even better, ~~but deemed out of scope, 
 the rust-api now communicates that lseek takes a reference to a file that should not be mutated 
 (it can safely be mutated with synchronization, again out of scope)~~, an offset, and a `Whence`-enum which 
-can only be one of 5 types. 
+can only be one of 5 values. 
 
 ---
 
@@ -500,9 +504,10 @@ can only be one of 5 types.
 
 When working with unsafe and raw pointers in `Rust` it's easy to get it wrong, it's best to keep `Rust`'s aliasing 
 rules top of mind when trying: 
+
 > There can only be one mutable reference and no other references to some object, alternatively there can be 
 > however many immutable reference to an object at a given time.
-> The data behind an immutable reference must not change immutably while holding the reference.
+> The data behind an immutable reference must not change while holding the reference.
 
 What this means in practice is that if an immutable reference is taken to a `file`-struct backed by a pointer 
 that the kernel provides, and that pointer is changed while holding the reference, that's UB.  
@@ -601,16 +606,17 @@ impl ProcOpFileHandle {
 ```
 
 In this case the `Rust`-code does not take any reference, and thus side-steps the aliasing-problems completely, 
-instead using pointer-arithmetic to find the correct field on the `file`-struct, and reading that directly.  
+instead using pointer-arithmetic to find the correct field on the `file`-struct, and reading/writing that directly.  
 
 #### Data-races
 
-If the comments were read another problem has now become apparent, there's a data-race if there isn't exclusive access 
+If the comments were read another problem has now become apparent, there's a 
+[data-race](https://en.wikipedia.org/wiki/Race_condition#Data_race) if there isn't exclusive access 
 to the pos-pointer.  
 
 Looking back at the `C`-code: 
 
-In `ksys_read` `fdget_pos(fd)` was [invoked here](https://github.com/MarcusGrass/linux/blob/mg/proc-fs/fs/read_write.c#L610).
+In `ksys_read`, `fdget_pos(fd)` was [invoked here](https://github.com/MarcusGrass/linux/blob/mg/proc-fs/fs/read_write.c#L610).
 
 `fdget_pos` looks like this:
 
@@ -671,39 +677,39 @@ the `file`'s `pos` won't be shared while the `Rust`-code is using it.
 In practice, for the `pos`-field, this means that when reading to it, the `Rust`-code may get an old-value, 
 or worse, an incomplete or unexpected value, it's undefined.  
 
-That issue cannot be worked around, and in some cases, directly reading the value would be UB, 
+That issue cannot be worked around and in some cases directly reading the value would be UB, 
 for example if the `Rust`-code expects a struct where all bit-patterns aren't valid.
 
 In the case of the `proc`-handler, and `pos`-field, the `Rust`-code is trying to read an `loff_t` which on 
 `x86_64` is an `i64`, but on other platforms it's an equally simple number.  
 
 `loff_t` is valid for all bit-patterns, so reading it is not UB by itself, it's correctly initialized memory, 
-but the value of it may be garbage.  
+but the value of it may be garbage due to simultaneous modification by a different thread.    
 
 As the above `Rust`-code comments describe, the read value shall never be trusted and always be subject to 
 validation, the reading itself is `safe`, but the function is marked `unsafe` anyway to make that fact extra clear.  
 
+This means that it's up to the user to properly synchronize access, not doing so will not cause UB, but 
+may cause concurrency bugs.  
+
 #### Handling reading racy data for more complex structs
 
-Since reading `pos` from `file` happened to be simple, ways of handling more complex cases wasn't explained.
-Shortly, if `Rust`-code wants to read some struct from a pointer that could contain any bit-pattern, and the 
-struct cannot tolerate any bit-pattern, the programmer would need to read into something else first.
+Since reading `pos` from `file` happened to be simple, ways of handling more complex cases weren't explained.
+If `Rust`-code wants to read some struct from a pointer that could contain any bit-pattern, and the 
+struct cannot tolerate any bit-pattern, the programmer would need to read into something else first.  
 
 ```rust
-use std::ptr::NonNull;
-
 struct MyStruct {
   field_a: Inner,
   field_b: OtherThing,
 }
 
-/// # Safety
 unsafe fn read_my_struct_from_pointer(ptr: *mut MyStruct) -> Option<MyStruct> {
-  // Comp-time size of the struct in bytes
+  // Comptime size of the struct in bytes
   const LEN: usize = core::mem::size_of::<MyStruct>();
   // Zeroed byte-array that can hold that number of bytes
   let mut bytes = [0u8; LEN];
-  let byte_ptr = (&mut bytes) as *mut u8;
+  let byte_ptr = bytes.as_mut_ptr();
   // Copy the raw data into the byte-array
   ptr.cast::<u8>()
           .copy_to_nonoverlapping(byte_ptr, LEN);
@@ -714,9 +720,11 @@ unsafe fn read_my_struct_from_pointer(ptr: *mut MyStruct) -> Option<MyStruct> {
 
 That may look trivial, but implementing `try_from_bytes` is where memory-layout-requirements have to be checked, 
 there are crates for that, like [bytemuck](https://docs.rs/bytemuck/latest/bytemuck/), if encountering that 
-kind of situation, looking into that is recommended.  
+kind of situation looking there is a good start.  
 
 ---
+
+### Back to abstracting
 
 Now the signature looks like this:
 
@@ -734,7 +742,7 @@ the inner pointer is shared with `C`-code, but there's no reason to make a bad p
 
 ---
 
-### Continuing the abstraction
+### Wrapping the `unsafe extern "C" fn`
 
 Continuing, something needs to wrap this `Rust`-function, validate that `Whence` can be converted from the provided `int` 
 from the `C`-style function, check that the file-pointer is non-null and create a `ProcOpsFileHandle`, and lastly handle 
@@ -770,7 +778,7 @@ unsafe extern "C" fn proc_lseek(
 ```
 
 The `T::LSEEK` comes from a generic bound, as with the minimal example, this function-pointer comes from 
-a struct, which is bounded on a struct implementing a trait.
+a struct which implements a trait.  
 
 The definition of the generated `proc_ops` looks like this:
 ```rust 
@@ -990,18 +998,22 @@ Now it's time to use the abstraction, it looks like this:
 struct ProcHand;
 
 /// Implement `ProcHandler`, providing static references to rust-functions
+...
 impl ProcHandler<'static> for ProcHand {
-    const OPEN: kernel::proc_fs::ProcOpen<'static> = &popen;
+  const OPEN: kernel::proc_fs::ProcOpen<'static> = &|f| unsafe { Self::popen(f) };
 
-    const READ: kernel::proc_fs::ProcRead<'static> = &pread;
+  const READ: kernel::proc_fs::ProcRead<'static> =
+    &|f, u, o| unsafe { Self::pread(f, u, o) };
 
-    const WRITE: kernel::proc_fs::ProcWrite<'static> = &pwrite;
+  const WRITE: kernel::proc_fs::ProcWrite<'static> =
+    &|f, u, o| unsafe { Self::pwrite(f, u, o) };
 
-    const LSEEK: kernel::proc_fs::ProcLseek<'static> = &plseek;
+  const LSEEK: kernel::proc_fs::ProcLseek<'static> =
+    &|f, o, w| unsafe { Self::plseek(f, o, w) };
 }
 
 unsafe fn popen(file: &mut ProcOpFileHandle) -> Result<i32> {
-    Ok(0)
+    ...
 }
 
 unsafe fn pread(
