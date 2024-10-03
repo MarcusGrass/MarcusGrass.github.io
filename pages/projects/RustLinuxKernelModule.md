@@ -121,7 +121,7 @@ That interface is provided through the last argument `...,proc_ops *proc_ops);..
 
 ### The proc API
 
-The proc API, as exposed through the `proc_ops`-struct:
+On the `C`-side, the proc API as exposed through the `proc_ops`-struct:
 
 [proc_ops](https://github.com/Rust-for-Linux/linux/blob/e31f0a57ae1ab2f6e17adb8e602bc120ad722232/include/linux/proc_fs.h#L29):
 
@@ -173,7 +173,7 @@ It just returns `0` for success.
 ---
 
 There are cases where one would like to do something when the file is opened, in that case, 
-the `*file`-pointer could be modified, for example by editing the `void *private_data`-field to add some data 
+the `*file`-pointer could be modified, for example by writing to the `void *private_data`-field to add some data 
 that will follow the file through its coming operations. 
 Read more about the [file structure here](https://www.oreilly.com/library/view/linux-device-drivers/0596000081/ch03s04.html), 
 or check out its definition [here](https://github.com/Rust-for-Linux/linux/blob/e31f0a57ae1ab2f6e17adb8e602bc120ad722232/include/linux/fs.h#L992).  
@@ -182,14 +182,14 @@ or check out its definition [here](https://github.com/Rust-for-Linux/linux/blob/
 ### proc_read
 
 Now onto some logic, when a user wants to read from the file 
-it provides a buffer and an offset pointer, the signature looks like 
+the user provides a buffer and an offset pointer, the signature looks like 
 [this:](https://github.com/Rust-for-Linux/linux/blob/e31f0a57ae1ab2f6e17adb8e602bc120ad722232/include/linux/proc_fs.h#L32)
 
 ```c
 ssize_t	proc_read(struct file *f, char __user *buf, size_t buf_len, loff_t *offset);
 ```
 
-Again there's the file structure-pointer which could contain eg.g `private_data` that 
+Again there's the `file`-structure pointer which could contain e.g. `private_data` that 
 was put there in an `open`-implementation, as well as a suspiciously annotated 
 `char __user *buf`.
 
@@ -241,7 +241,6 @@ Assuming that the offset makes sense, the module should return the new offset.
 That's it, with those 4 functions implemented there should be a fairly complete working 
 file created when the functions are passed as members of the `proc_ops`-struct, time to start!
 
-
 ### Generating bindings
 
 Rust for Linux uses Rust-bindings generated from the kernel headers. 
@@ -257,7 +256,7 @@ theoretically the module could be implemented by just using the C-api
 directly as-is through the functions provided by the bindings. 
 
 One of `Rust`'s strengths is being able to take unsafe code and make safe abstractions 
-on top of them. But, using those functions directly can be a good start to figure out 
+on top of them. However, using those functions directly can be a good start to figure out 
 how the APIs work.  
 
 The generated `Rust` functions-pointer-definitions look like this:
