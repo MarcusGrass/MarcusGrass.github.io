@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="en" xmlns="http://www.w3.org/1999/html">
+
+    <meta charset="UTF-8">
+    <base href="/">
+    <link rel="stylesheet" href="static/styles.css">
+    <link rel="stylesheet" href="static/github-markdown.css">
+    <link rel="stylesheet" href="static/starry_night.css">
+    <title>Threads</title>
+
+
+<div id="menu">
+<a href=/ class="menu-item">Home</a><a href=/table-of-contents.html class="menu-item">Table of contents</a>
+</div>
+<div id="content">
+<div class="markdown-body"><h1>Threads, some assembly required.</h1>
+<p>Lately I've been thinking about adding threads to <a href="https://github.com/MarcusGrass/tiny-std/">tiny-std</a>,
+my linux-only <code>x86_64</code>/<code>aarch64</code>-only tiny standard library for <a href="https://github.com/rust-lang/rust">Rust</a>.</p>
+<p>Now I've finally done that, with some jankiness, in this write-up I'll
+go through that process.</p>
+<h2>Parallelism</h2>
+<p>Sometimes in programming, <a href="https://en.wikipedia.org/wiki/Parallel_computing">parallelism</a> (doing multiple things at the
+same time), is desirable. For example, to complete some task two different long-running calculations have to be made.
+If those can be run in parallel, our latency becomes that of the slowest of those tasks (plus some overhead).</p>
+<p>Some ways of achieving parallelism in your program are:</p>
+<ol>
+<li><a href="https://en.wikipedia.org/wiki/Single_instruction,_multiple_data">SIMD</a>, hopefully
+your compiler does that for you. But here we're talking about singular processor operations,
+not arbitrary tasks.
+<li>Offloading tasks to the OS. If your OS has asynchronous apis then you could ask it to do multiple things at once
+and achieve parallelism that way.
+<li>Running tasks in other processes.
+<li>Running tasks in threads.
+</ol>
+<h2>Threads</h2>
+<p><a href="https://en.wikipedia.org/wiki/Thread_(computing)">Wikipedia</a> says of threads:</p>
+<blockquote>
+<p>"In computer science, a thread of execution is the smallest sequence of programmed instructions that can be
+managed independently by a scheduler, which is typically a part of the operating system."</p>
+</blockquote>
+<p>Threads from a programming perspective, are managed by the OS, how threads work is highly OS-dependent. I'll
+only go into <code>Linux</code> specifically here, and only from an api-consumers perspective.</p>
+<h3>Spawning a thread with a minimal task</h3>
+<p>In the rust std-library, a thread can be spawned with</p>
+<div class="highlight highlight-rust"><pre><span class="pl-k">fn</span> <span class="pl-en">main</span>() {
+    <span class="pl-k">let</span> <span class="pl-smi">handle</span> <span class="pl-k">=</span> <span class="pl-en">std</span><span class="pl-k">::</span><span class="pl-en">thread</span><span class="pl-k">::</span><span class="pl-en">spawn</span>(<span class="pl-k">||</span> {
+        <span class="pl-en">std</span><span class="pl-k">::</span><span class="pl-en">thread</span><span class="pl-k">::</span><span class="pl-en">sleep</span>(<span class="pl-en">std</span><span class="pl-k">::</span><span class="pl-en">time</span><span class="pl-k">::</span><span class="pl-en">Duration</span><span class="pl-k">::</span><span class="pl-en">from_millis</span>(<span class="pl-c1">500</span>));
+        <span class="pl-en">println!</span>(<span class="pl-s"><span class="pl-pds">"</span>Hello from my thread<span class="pl-pds">"</span></span>);
+    });
+<span class="pl-c">    // Suspends execution of the calling thread until the child-thread completes.  </span>
+    <span class="pl-smi">handle</span><span class="pl-k">.</span><span class="pl-en">join</span>()<span class="pl-k">.</span><span class="pl-en">unwrap</span>();   
+}
+</pre></div>
+<p>In the above program, some setup runs before the main-function, some delegated to
+<a href="https://en.wikipedia.org/wiki/C_standard_library">libc</a>. Which sets up what it deems appropriate.
+<code>Rust</code> sets up a panic handler, and miscellaneous things the program needs to run correctly,
+then the main-thread starts executing the <code>main</code> function.<br>
+In the <code>main</code> function, the main thread spawns a child, which at the point of spawn starts executing the task provided by the
+supplied closure <code>Wait 500 millis, then print a message</code>, then waits for that thread to complete.</p>
+<p>I wanted to replicate this API, without using <code>libc</code>.</p>
+<h3>Clone, swiss army syscall</h3>
+<p>The <code>Linux</code> <a href="https://man7.org/linux/man-pages/man2/clone.2.html">clone syscall</a> can be used for a lot of things.<br>
+So many that it's extremely difficult to use it correctly, it's very easy to cause security issues through
+various memory-management mistakes, many of which I discovered on this journey.</p>
+<p>The signature for the <a href="https://en.wikipedia.org/wiki/Glibc">glibc</a> clone wrapper function looks like:</p>
+<div class="highlight highlight-c"><pre><span class="pl-k">int</span> <span class="pl-en">clone</span>(<span class="pl-k">int</span> (*fn)(<span class="pl-k">void</span> *), void *stack, int flags, void *arg, ...
+<span class="pl-c">/* pid_t *parent_tid, void *tls, pid_t *child_tid */</span> );
+</pre></div>
+<p>Right away I can tell that calling this is not going to be easy from <code>Rust</code>, we've got
+<a href="https://en.wikipedia.org/wiki/Variadic_function">varargs</a> in there, which is problematic because:</p>
+<ol>
+<li><code>Rust</code> doesn't have varargs, porting some <code>C</code>-functionality from for example
+<a href="https://en.wikipedia.org/wiki/Musl">musl</a> won't be straight forward.
+<li>Varargs are not readable (objectively true opinion).
+</ol>
+<p>Skipping down to the <code>Notes</code>-section of the documentation shows the actual syscall interface (for <code>x86_64</code> in a
+conspiracy to ruin my life, the last two args are switched on <code>aarch64</code>):</p>
+<div class="highlight highlight-c"><pre><span class="pl-k">long</span> <span class="pl-en">clone</span>(<span class="pl-k">unsigned</span> <span class="pl-k">long</span> flags, <span class="pl-k">void</span> *stack,
+                      <span class="pl-k">int</span> *parent_tid, <span class="pl-k">int</span> *child_tid,
+                      <span class="pl-k">unsigned</span> <span class="pl-k">long</span> tls);
+</pre></div>
+<p>Very disconcerting, since the <code>C</code>-api which accepts varargs, seems to do quite a bit of work before making the syscall,
+handing over a task to the OS.</p>
+<p>In simple terms, clone is a way to "clone" the current process. If you have experience with
+<a href="https://man7.org/linux/man-pages/man2/fork.2.html">fork</a>, that's an example of <code>clone</code>.
+Here's an equivalent <code>fork</code> using the <code>clone</code> syscall from <code>tiny-std</code>:</p>
+<div class="highlight highlight-rust"><pre><span class="pl-c">/// Fork isn't implemented for aarch64, we're substituting with a clone call here</span>
+<span class="pl-c">/// # Errors</span>
+<span class="pl-c">/// See above</span>
+<span class="pl-c">/// # Safety</span>
+<span class="pl-c">/// See above</span>
+#[cfg(target_arch <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>aarch64<span class="pl-pds">"</span></span>)]
+<span class="pl-k">pub</span> <span class="pl-k">unsafe</span> <span class="pl-k">fn</span> <span class="pl-en">fork</span>() <span class="pl-k">-></span> <span class="pl-en">Result</span>&#x3C;<span class="pl-en">PidT</span>> {
+<span class="pl-c">    // SIGCHLD is mandatory on aarch64 if mimicking fork it seems</span>
+    <span class="pl-k">let</span> <span class="pl-smi">cflgs</span> <span class="pl-k">=</span> <span class="pl-k">crate::</span><span class="pl-en">platform</span><span class="pl-k">::</span><span class="pl-en">SignalKind</span><span class="pl-k">::</span><span class="pl-c1">SIGCHLD</span>;
+    <span class="pl-k">let</span> <span class="pl-smi">res</span> <span class="pl-k">=</span> <span class="pl-en">syscall!</span>(<span class="pl-c1">CLONE</span>, <span class="pl-smi">cflgs</span><span class="pl-k">.</span><span class="pl-en">bits</span>()<span class="pl-k">.</span><span class="pl-c1">0</span>, <span class="pl-c1">0</span>, <span class="pl-c1">0</span>, <span class="pl-c1">0</span>, <span class="pl-c1">0</span>);
+    <span class="pl-en">bail_on_below_zero!</span>(<span class="pl-smi">res</span>, <span class="pl-s"><span class="pl-pds">"</span>CLONE syscall failed<span class="pl-pds">"</span></span>);
+    #[allow(clippy<span class="pl-k">::</span>cast_possible_truncation, clippy<span class="pl-k">::</span>cast_possible_wrap)]
+    <span class="pl-en">Ok</span>(<span class="pl-smi">res</span> <span class="pl-k">as</span> <span class="pl-en">i32</span>)
+}
+</pre></div>
+<p>What happens immediately after this call, is that our process is cloned and starts executing past the code which called
+<code>clone</code>, following the above <code>Rust</code> example:</p>
+<div class="highlight highlight-rust"><pre><span class="pl-k">fn</span> <span class="pl-en">parallelism_through_multiprocess</span>() {
+    <span class="pl-k">let</span> <span class="pl-smi">pid</span> <span class="pl-k">=</span> <span class="pl-k">unsafe</span> { <span class="pl-en">rusl</span><span class="pl-k">::</span><span class="pl-en">process</span><span class="pl-k">::</span><span class="pl-en">fork</span>()<span class="pl-k">.</span><span class="pl-en">unwrap</span>() };
+    <span class="pl-k">if</span> <span class="pl-smi">pid</span> <span class="pl-k">==</span> <span class="pl-c1">0</span> {
+        <span class="pl-en">println!</span>(<span class="pl-s"><span class="pl-pds">"</span>In child!<span class="pl-pds">"</span></span>);
+        <span class="pl-en">rusl</span><span class="pl-k">::</span><span class="pl-en">process</span><span class="pl-k">::</span><span class="pl-en">exit</span>(<span class="pl-c1">0</span>);
+    } <span class="pl-k">else</span> {
+        <span class="pl-en">println!</span>(<span class="pl-s"><span class="pl-pds">"</span>In parent, spawned child {pid}<span class="pl-pds">"</span></span>);
+    }
+}
+</pre></div>
+<p>This program will print (in non-deterministic order):<br>
+<code>In parent, spawned child 24748</code> and<br>
+<code>In child</code>, and return to the caller.</p>
+<p>Here we achieved parallelism by spawning another process and doing work there, separately scheduled by the OS,
+then exited that process. At the same time, our caller returns as usual, only stopping briefly to make the syscall.</p>
+<p>Achieving parallelism in this way can be fine. If you want to run a command, <code>forking</code>/<code>cloning</code> then executing
+another binary through the <a href="https://man7.org/linux/man-pages/man2/execve.2.html">execve-syscall</a>
+is usually how that's done.<br>
+Multiprocessing can be a bad choice if the task is small, because setting up an entire other process can be resource
+intensive, and communicating between processes can be slower than communicating through shared memory.</p>
+<h3>Threads: Cloning intra-process with shared memory</h3>
+<p>What we think of as threads in linux are sometimes called
+<a href="https://en.wikipedia.org/wiki/Light-weight_process">Light-Weight Processes</a>, the above clone call spawned a regular
+process, which got a full copy of the parent-process' memory with copy-on-write semantics.</p>
+<p>To reduce overhead in both spawning, and communicating between the cloned process and the rest of the processes
+in the application, a combination of flags are used:</p>
+<div class="highlight highlight-rust"><pre><span class="pl-k">let</span> <span class="pl-smi">flags</span> <span class="pl-k">=</span> <span class="pl-en">CloneFlags</span><span class="pl-k">::</span><span class="pl-c1">CLONE_VM</span>
+        <span class="pl-k">|</span> <span class="pl-en">CloneFlags</span><span class="pl-k">::</span><span class="pl-c1">CLONE_FS</span>
+        <span class="pl-k">|</span> <span class="pl-en">CloneFlags</span><span class="pl-k">::</span><span class="pl-c1">CLONE_FILES</span>
+        <span class="pl-k">|</span> <span class="pl-en">CloneFlags</span><span class="pl-k">::</span><span class="pl-c1">CLONE_SIGHAND</span>
+        <span class="pl-k">|</span> <span class="pl-en">CloneFlags</span><span class="pl-k">::</span><span class="pl-c1">CLONE_THREAD</span>
+        <span class="pl-k">|</span> <span class="pl-en">CloneFlags</span><span class="pl-k">::</span><span class="pl-c1">CLONE_SYSVSEM</span>
+        <span class="pl-k">|</span> <span class="pl-en">CloneFlags</span><span class="pl-k">::</span><span class="pl-c1">CLONE_CHILD_CLEARTID</span>
+        <span class="pl-k">|</span> <span class="pl-en">CloneFlags</span><span class="pl-k">::</span><span class="pl-c1">CLONE_SETTLS</span>;
+</pre></div>
+<p>Clone flags are tricky to explain, they interact with each other as well, but in short:</p>
+<ol>
+<li><code>CLONE_VM</code>, clone memory without copy-on-write semantics, meaning, the parent and child
+share memory space and can modify each-other's memory.
+<li><code>CLONE_FS</code>, the parent and child share the same filesystem information, such as current directory.
+<li><code>CLONE_FILES</code>, the parent and child share the same file-descriptor table,
+(if one opens an <code>fd</code>, that <code>fd</code> is available to the other).
+<li><code>CLONE_SIGHAND</code>, the parent and child share signal handlers.
+<li><code>CLONE_THREAD</code>, the child-process is placed in the same thread-group as the parent.
+<li><code>CLONE_SYSVSEM</code>, the parent and child shares semaphores.
+<li><code>CLONE_CHILD_CLEARTID</code>, wake up waiters for the supplied <code>child_tid</code> futex pointer when the child exits
+(we'll get into this).
+<li><code>CLONE_SETTLS</code>, set the thread-local storage to the data pointed at by the <code>tls</code>-variable (architecture specific,
+we'll get into this as well).
+</ol>
+<p>The crucial flags to run some tasks in a thread are only:</p>
+<ol>
+<li><code>CLONE_VM</code>
+<li><code>CLONE_THREAD</code>
+</ol>
+<p>The rest are for usability and expectation, as well as cleanup reasons.</p>
+<h2>Implementation</h2>
+<p>Now towards the actual implementation of a minimal threading API.</p>
+<h3>API expectation</h3>
+<p>The std library in <code>Rust</code> provides an interface that could be used like this:</p>
+<div class="highlight highlight-rust"><pre><span class="pl-k">let</span> <span class="pl-smi">join_handle</span> <span class="pl-k">=</span> <span class="pl-en">std</span><span class="pl-k">::</span><span class="pl-en">thread</span><span class="pl-k">::</span><span class="pl-en">spawn</span>(<span class="pl-k">||</span> <span class="pl-en">println!</span>(<span class="pl-s"><span class="pl-pds">"</span>Hello from my thread!<span class="pl-pds">"</span></span>));
+<span class="pl-smi">join_handle</span><span class="pl-k">.</span><span class="pl-en">join</span>()<span class="pl-k">.</span><span class="pl-en">unwrap</span>();
+</pre></div>
+<p>A closure that is run on another thread is supplied and a <code>JoinHandle&#x3C;T></code> is returned, the join handle
+can be awaited by calling its <code>join</code>-method, which will block the calling thread until the thread executing the closure
+has completed. If it <code>panics</code>, the <code>Result</code> will be an <code>Err</code>, if it succeeds, it will be an <code>Ok(T)</code> where <code>T</code> is
+the return value from the closure, which in this case is nothing (<code>()</code>);</p>
+<h3>Executing a clone call</h3>
+<p>If <code>CLONE_VM</code> is specified, a stack should be supplied. <code>CLONE_VM</code> means sharing mutable memory, if we didn't
+supply the stack, both threads would continue mutating the same stack area, here's an excerpt from
+<a href="https://man7.org/linux/man-pages/man2/clone.2.html">the docs</a> about that:</p>
+<blockquote>
+<p>[..] (If the
+child shares the parent's memory because of the use of the
+CLONE_VM flag, then no copy-on-write duplication occurs and chaos
+is likely to result.) - "C library/kernel differences"-section</p>
+</blockquote>
+<h4>Allocating the stack</h4>
+<p>Therefore, setting up a stack is required. There are a few options for that, the kernel only needs a chunk of correctly
+aligned memory depending on what platform we're targeting. We could even just take some memory off our own stack
+if we want too.</p>
+<h5>Use the callers stack</h5>
+<div class="highlight highlight-rust"><pre><span class="pl-k">fn</span> <span class="pl-en">clone</span>() {
+<span class="pl-c">    /// 16 kib stack allocation</span>
+    <span class="pl-k">let</span> <span class="pl-k">mut</span> <span class="pl-smi">my_stack</span> <span class="pl-k">=</span> [<span class="pl-c1">0</span><span class="pl-en">u8</span>; <span class="pl-c1">16384</span>];
+    <span class="pl-k">let</span> <span class="pl-smi">stack_ptr</span> <span class="pl-k">=</span> <span class="pl-smi">my_stack</span><span class="pl-k">.</span><span class="pl-en">as_mut_ptr</span>();
+<span class="pl-c">    /// pass through to syscall</span>
+    <span class="pl-en">syscall!</span>(<span class="pl-c1">CLONE</span>, <span class="pl-k">...</span>, <span class="pl-smi">stack_ptr</span>, <span class="pl-k">...</span>);
+}
+</pre></div>
+<p>This is bad for a generic API for a multitude of reasons.
+It restricts the user to threads that complete before the caller has popped the stack frame in which they were created,
+since the part of the stack that was used in this frame will be reused by the caller later, possibly while the
+child-thread still uses it for its own stack. Which we now know, would result in chaos.</p>
+<p>Additionally, we will have to have stack space available on the calling thread, for an arbitrary amount of children
+if this API was exposed to users. In the case a heap-allocations, the assumption that we will have enough memory for
+reasonable thread-usage is valid. <code>Rust</code>'s default thread stack size is <code>2MiB</code>. On a system with <code>16GiB</code> of RAM, with
+<code>8GiB</code> available at a given time, that's 4000 threads, spawning that many is likely not intentional or performant.</p>
+<p>Keeping threads on the main-thread's stack, significantly reduces our memory availability, along with the risk of chaos.</p>
+<p>There is a case to be made for some very specific application which spawns some threads in scope, does some work, then exits,
+to reuse the caller's stack. But I have yet to encounter that kind of use-case in practice, let's move on to something
+more reasonable.</p>
+<h5>Mmap more stack-space</h5>
+<p>This is what <code>musl</code> does. We allocate the memory that we want to use from new os-pages and use those.<br>
+We could potentially do a regular <code>malloc</code> as well, although that would mean less control over the allocated memory.</p>
+<h4>Communicating with the started thread</h4>
+<p>Now <code>mmap</code>-ing some stack-memory is enough for the OS to start a thread with its own stack, but then what?<br>
+The thread needs to know what to do, we can't provide it with any arguments, we need to put all the data it needs
+on its stack before starting execution of the task.</p>
+<p>This means that we'll need some assembly, since using the clone syscall and then continuing in <code>Rust</code> relinquishes
+control that we need over the stack, we need to put almost the entire child-thread's lifetime in assembly.</p>
+<p>The structure of the call is mostly stolen from <code>musl</code>, with some changes for this more minimal use-case.
+The rust function will look like this:</p>
+<div class="highlight highlight-rust"><pre><span class="pl-k">extern</span> <span class="pl-s"><span class="pl-pds">"</span>C<span class="pl-pds">"</span></span> {
+    <span class="pl-k">fn</span> <span class="pl-en">__clone</span>(
+        <span class="pl-smi">start_fn</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
+        <span class="pl-smi">stack_ptr</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
+        <span class="pl-smi">flags</span><span class="pl-k">:</span> <span class="pl-en">i32</span>,
+        <span class="pl-smi">args_ptr</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
+        <span class="pl-smi">tls_ptr</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
+        <span class="pl-smi">child_tid_ptr</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
+        <span class="pl-smi">stack_unmap_ptr</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
+        <span class="pl-smi">stack_sz</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
+    ) <span class="pl-k">-></span> <span class="pl-en">i32</span>;
+}
+</pre></div>
+<ol>
+<li>It takes a pointer to a <code>start_fn</code>, which is a <code>C</code> calling convention function pointer, where our thread will pick up.
+<li>It also takes a pointer to the stack, <code>stack_ptr</code>.
+<li>It takes clone-flags which we send onto the OS in the syscall.
+<li>It takes an <code>args_ptr</code>, which is the closure we want to run, converted to a <code>C</code> calling convention function pointer.
+<li>It takes a <code>tls_ptr</code>, a pointer to some thread local storage, which we'll need to deallocate the thread's stack, and
+communicate with the calling thread.
+<li>It takes a <code>child_tid_ptr</code>, which will be used to synchronize with the calling thread.
+<li>It takes a <code>stack_unmap_ptr</code>, which is the base address that we allocated for the stack at its original <code>0</code> offset.
+<li>It takes the <code>stack_sz</code>, stack-size, which we'll need to deallocate the stack later.
+</ol>
+<h4>Syscalls</h4>
+<p><code>x86_64</code> and <code>aarch64</code> assembly has a command to execute a <code>syscall</code>.</p>
+<p>A syscall is like a function call to the kernel, we'll need to make three syscalls using assembly:</p>
+<ol>
+<li>CLONE, nr 56 on <code>x86_64</code>
+<li>MUNMAP, nr 11 on <code>x86_64</code>
+<li>EXIT, nr 60 on <code>x86_64</code>
+</ol>
+<p>The interface for the syscall is as follows:</p>
+<div class="highlight highlight-rust"><pre><span class="pl-c">/// Syscall conventions are on 5 args:</span>
+<span class="pl-c">/// - arg -> arch: reg,</span>
+<span class="pl-c">/// - nr -> x86: rax, aarch64: x8</span>
+<span class="pl-c">/// - a1 -> x86: rdi, aarch64: x0</span>
+<span class="pl-c">/// - a2 -> x86: rsi, aarch64: x1</span>
+<span class="pl-c">/// - a3 -> x86: rdx, aarch64: x2</span>
+<span class="pl-c">/// - a4 -> x86: r10, aarch64: x3</span>
+<span class="pl-c">/// - a5 -> x86: r8,  aarch64: x4</span>
+<span class="pl-c">/// Pseudocode syscall as extern function: </span>
+<span class="pl-k">extern</span> <span class="pl-s"><span class="pl-pds">"</span>C<span class="pl-pds">"</span></span> {
+    <span class="pl-k">fn</span> <span class="pl-en">syscall</span>(<span class="pl-smi">nr</span><span class="pl-k">:</span> <span class="pl-en">usize</span>, <span class="pl-smi">a1</span><span class="pl-k">:</span> <span class="pl-en">usize</span>, <span class="pl-smi">a2</span><span class="pl-k">:</span> <span class="pl-en">usize</span>, <span class="pl-smi">a3</span><span class="pl-k">:</span> <span class="pl-en">usize</span>, <span class="pl-smi">a4</span><span class="pl-k">:</span> <span class="pl-en">usize</span>, <span class="pl-smi">a5</span><span class="pl-k">:</span> <span class="pl-en">usize</span>);
+}
+</pre></div>
+<p>Onto the assembly, it can be boiled down to this:</p>
+<ol>
+<li>Prepare arguments to go in the right registers for the syscall.
+<li>Put what the thread needs into its stack.
+<li>Execute the clone syscall, return directly to the caller (parent-thread).
+<li>Pop data from the spawned thread's stack into registers.
+<li>Execute the function we wanted to run in the spawned thread.
+<li>Unmap the spawned thread's own stack
+<li>Exit 0
+</ol>
+<pre><code class="language-asm">// Boilerplate to expose the symbol
+.text
+.global __clone
+.hidden __clone
+.type   __clone,@function
+// Actual declaration
+__clone:
+// tls_ptr already in r8, syscall arg 5 register, due to C calling convention on this function, same with stack_ptr in rsi
+// Zero syscall nr register ax (eax = 32bit ax)
+xor eax, eax
+// Move 56 into the lower 8 bits of ax (al = 8bit ax), 56 is the CLONE syscall nr for x86_64, will become: syscall(56, .., stack_ptr, .., tls_ptr)
+mov al, 56
+// Move start function into r11, scratch register, save it there since we need to shuffle stuff around
+mov r11, rdi
+// Move flags into rdi, syscall arg 1 register, well become: syscall(56, flags, stack_ptr, .., .., tls_ptr)
+mov rdi, rdx
+// Zero parent_tid_ptr from syscall arg 3 register (not using), will become: syscall(56, flags, stack_ptr, 0, .., tls_ptr)
+xor rdx, rdx
+// Move child_tid_ptr into syscall arg 4 register (our arg 6), will become: syscall(56, flags, stack_ptr, 0, child_tid_ptr, tls_ptr)
+mov r10, r9
+// Move start function into r9
+mov r9, r11
+// Align stack ptr to -16
+and rsi, -16
+// Move down 8 bytes on the stack ptr
+sub rsi, 8
+// Move args onto the the top of the stack
+mov [rsi], rcx
+// Move down 8 bytes more on the stack ptr
+sub rsi, 8
+// Move the first arg that went on the stack into rcx (stack_unmap_ptr)
+mov rcx, [8 + rsp]
+// Move stack_unmap_ptr onto our new stack
+mov [rsi], rcx
+// Move the second arg that went on the stack into rcx (stack_sz)
+mov rcx, [16 + rsp]
+// Move down stack ptr
+sub rsi, 8
+// Move stack_sz onto the new stack
+mov [rsi], rcx
+// Make clone syscall
+syscall
+// Check if the syscall return vaulue is 0
+test eax, eax
+// if not zero, return (we're the calling thread)
+jnz 1f
+// Child:
+// Zero the base pointer
+xor ebp, ebp
+// Pop the stack_sz off the provided stack into callee saved register
+pop r13
+// Pop the stack_ptr off the provided stack into another callee saved register
+pop r12
+// Pop the start fn args off the provided stack into rdi
+pop rdi
+// Call the function we saved in r9, rdi first arg
+call r9
+// Zero rax (function return, we don't care)
+xor rax, rax
+// Move MUNMAP syscall into ax
+mov al, 11
+// Stack ptr as the first arg
+mov rdi, r12
+// Stack len as the second arg
+mov rsi, r13
+// Syscall, unmapping the stack
+syscall
+// Clear the output register, we can't use the return value anyway
+xor eax,eax
+// Move EXIT syscall nr into ax
+mov al, 60
+// Set exit code for the thread to 0
+mov rdi, 0
+// Make exit syscall
+syscall
+1: ret
+</code></pre>
+<p>And that's it, kinda, with some code wrapping this we can run an arbitrary closure on a separate thread!</p>
+<h3>Race conditions</h3>
+<p>We're far from done, in the happy case we're starting a thread, it completes, and deallocates its own stack.
+But, we need to get its returned value, and we need to know if it's done.</p>
+<p>Unlike a process, we cannot use the <a href="https://man7.org/linux/man-pages/man2/waitpid.2.html">wait-syscall</a> to wait
+for the process to complete, but there is another way, alluded to in the note on <code>CLONE_CHILD_CLEARTID</code>.</p>
+<h4>Futex messaging</h4>
+<p>If <code>CLONE_CHILD_CLEARTID</code> is supplied in clone-flags along with a pointer to a futex variable, something with a <code>u32</code>-layout
+in <code>Rust</code> that's most reasonably <code>AtomicU32</code>, then the OS will set that futex-value to <code>0</code> (not null) when the thread exits,
+successfully or not.</p>
+<p>This means that if the caller wants to <code>join</code>, i.e. blocking-wait for the child-thread to finish, it can use the
+<a href="https://man7.org/linux/man-pages/man2/futex.2.html">futex-syscall</a>.</p>
+<h4>Getting the returned value</h4>
+<p>The return value is fairly simple, we need to allocate space for it, for example with a pointer to an <code>UnsafeCell&#x3C;Option&#x3C;T>></code>,
+and then have the child-thread update it. The catch here is that we can't have <code>&#x26;</code>-references to that value while the child-thread
+may be writing to it, since that's <code>UB</code>. We share a pointer with the child containing the value, and we need to be
+absolutely certain that the child-thread is done with
+its modification before we try to read it. For example by waiting for it to exit by <code>join</code>-ing.</p>
+<h3>Memory leaks, who deallocates what?</h3>
+<p>We don't necessarily have to keep our <code>JoinHandle&#x3C;T></code> around after spawning a thread. A perfectly valid use-case is to
+just spawn some long-running thread and then forget about it, this causes a problem, if the calling thread doesn't have
+sole responsibility of deallocating the shared memory (the <code>futex</code> variable, and the return value), then we need a way
+to signal to the child-thread that it's that thread's responsibility to deallocate those variables before exiting.</p>
+<p>Enter the third shared variable, an <code>AtomicBool</code> called <code>should_dealloc</code>, both threads share a pointer to this variable
+as well.</p>
+<p>Now there are three deallocation-scenarios:</p>
+<ol>
+<li>Caller joins the child thread by waiting for the <code>futex</code>-variable to change value to <code>0</code>.
+In this case the caller deallocates the <code>futex</code>, takes the return value of the heap freeing its memory, and
+deallocates the <code>should_dealloc</code> pointer.
+<li>Caller drops the <code>JoinHandle&#x3C;T></code>. This is racy, we need to read <code>should_dealloc</code> to see that the child thread hasn't
+already completed its work. If it has, we wait on the <code>futex</code> to make sure the child thread is completely done, then
+deallocate as above.
+<li>The child thread tries to set <code>should_dealloc</code> to <code>true</code> and fails, meaning that the calling thread has already
+dropped the <code>JoinHandle&#x3C;T></code>. In this case, the child thread needs to signal to the OS that the <code>futex</code> is no longer
+to be updated on thread exit through the
+<a href="https://man7.org/linux/man-pages/man2/set_tid_address.2.html">set_tid_address-syscall</a> (forgetting to do this results in a
+use after free, oof. Here's a <code>Linux</code>-code-comment calling me a dumbass that I found when trying to find the source of the segfaults:
+</ol>
+<div class="highlight highlight-c"><pre><span class="pl-c">// 929ed21dfdb6ee94391db51c9eedb63314ef6847, kernel/fork.c#L1634, written by Linus himself</span>
+<span class="pl-k">if</span> (tsk->clear_child_tid) {
+		<span class="pl-k">if</span> (<span class="pl-c1">atomic_read</span>(&#x26;mm-><span class="pl-smi">mm_users</span>) > <span class="pl-c1">1</span>) {
+			<span class="pl-c">/*</span>
+<span class="pl-c">			 * We don't check the error code - if userspace has</span>
+<span class="pl-c">			 * not set up a proper pointer then tough luck.</span>
+<span class="pl-c">			 */</span>
+			<span class="pl-c1">put_user</span>(<span class="pl-c1">0</span>, tsk-><span class="pl-smi">clear_child_tid</span>);
+			<span class="pl-c1">do_futex</span>(tsk-><span class="pl-smi">clear_child_tid</span>, FUTEX_WAKE,
+					<span class="pl-c1">1</span>, <span class="pl-c1">NULL</span>, <span class="pl-c1">NULL</span>, <span class="pl-c1">0</span>, <span class="pl-c1">0</span>);
+		}
+		tsk-><span class="pl-smi">clear_child_tid</span> = <span class="pl-c1">NULL</span>;
+	}
+</pre></div>
+<p>). Then it can safely deallocate the shared variables.</p>
+<h3>Oh, right. Panics...</h3>
+<p>I imagine a world where <code>Rust</code> doesn't contain panics. Sadly, we don't live in that world, and thus we need to handle them.<br>
+If the thread panics, and we try to join then it's no issue, we'll get a <code>None</code> return value, and can continue with
+the regular cleanup from the caller.<br>
+However, if the thread panics after the caller has dropped the <code>JoinHandle&#x3C;T></code> the shared memory is leaked,
+and the stack isn't deallocated.</p>
+<p>A <code>Rust</code> panic handler could like this:</p>
+<div class="highlight highlight-rust"><pre><span class="pl-c">/// Dummy panic handler</span>
+#[panic_handler]
+<span class="pl-k">pub</span> <span class="pl-k">fn</span> <span class="pl-en">on_panic</span>(<span class="pl-smi">info</span><span class="pl-k">:</span> <span class="pl-k">&#x26;</span><span class="pl-en">core</span><span class="pl-k">::</span><span class="pl-en">panic</span><span class="pl-k">::</span><span class="pl-en">PanicInfo</span>) <span class="pl-k">-></span> <span class="pl-k">!</span> {
+    <span class="pl-k">loop</span> {}
+}
+</pre></div>
+<p>The signature shows that it gets <code>PanicInfo</code> and never returns.<br>
+When a thread panics, it enters that function and never returns, it's here that we need to handle cleanup in the
+case that the thread panics.</p>
+<p>What we need:</p>
+<ol>
+<li>A pointer to the <code>futex</code>
+<li>A pointer to the return value
+<li>A pointer to the <code>should_dealloc</code> variable
+<li>The address at which we allocated this thread's stack
+<li>The size of that allocated stack
+</ol>
+<p>We could insert those in registers that shouldn't be touched by the user-supplied function, but that's fairly brittle,
+instead we'll use the dreaded <code>tls</code>.</p>
+<h4>Thread-local storage</h4>
+<p>Thread-local storage, or <code>tls</code> is a way to store thread-specific data.<br>
+For <code>x86_64</code> and <code>aarch64</code> there is a specific register we can use to store a pointer to some arbitrary data,
+we can read from that data at any time from any place, in other words, the data is global to the thread.</p>
+<p>In practice:</p>
+<div class="highlight highlight-rust"><pre>#[repr(<span class="pl-en">C</span>)]
+#[derive(<span class="pl-en">Copy</span>, <span class="pl-en">Clone</span>)]
+<span class="pl-k">pub</span>(<span class="pl-k">crate</span>) <span class="pl-k">struct</span> <span class="pl-en">ThreadLocalStorage</span> {
+<span class="pl-c">    // First arg needs to be a pointer to this struct, it's immediately dereferenced</span>
+    <span class="pl-k">pub</span>(<span class="pl-k">crate</span>) <span class="pl-smi">self_addr</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
+<span class="pl-c">    // Info on spawned threads that allow us to unmap the stack later</span>
+    <span class="pl-k">pub</span>(<span class="pl-k">crate</span>) <span class="pl-smi">stack_info</span><span class="pl-k">:</span> <span class="pl-en">Option</span>&#x3C;<span class="pl-en">ThreadDealloc</span>>,
+}
+#[repr(<span class="pl-en">C</span>)]
+#[derive(<span class="pl-en">Copy</span>, <span class="pl-en">Clone</span>)]
+<span class="pl-k">pub</span>(<span class="pl-k">crate</span>) <span class="pl-k">struct</span> <span class="pl-en">ThreadDealloc</span> {
+<span class="pl-c">    // For the stack dealloc</span>
+    <span class="pl-smi">stack_addr</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
+    <span class="pl-smi">stack_sz</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
+<span class="pl-c">    // For the return value dealloc</span>
+    <span class="pl-smi">payload_ptr</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
+    <span class="pl-smi">payload_layout</span><span class="pl-k">:</span> <span class="pl-en">Layout</span>,
+<span class="pl-c">    // Futex, </span>
+    <span class="pl-smi">futex_ptr</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
+<span class="pl-c">    // Sync who deallocs</span>
+    <span class="pl-smi">sync_ptr</span><span class="pl-k">:</span> <span class="pl-en">usize</span>,
+}
+#[inline]
+#[must_use]
+<span class="pl-k">fn</span> <span class="pl-en">get_tls_ptr</span>() <span class="pl-k">-></span> <span class="pl-k">*mut</span> <span class="pl-en">ThreadLocalStorage</span> {
+    <span class="pl-k">let</span> <span class="pl-k">mut</span> <span class="pl-smi">output</span><span class="pl-k">:</span> <span class="pl-en">usize</span>;
+    #[cfg(target_arch <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>x86_64<span class="pl-pds">"</span></span>)]
+    <span class="pl-k">unsafe</span> {
+        <span class="pl-en">core</span><span class="pl-k">::</span><span class="pl-en">arch</span><span class="pl-k">::</span><span class="pl-en">asm!</span>(<span class="pl-s"><span class="pl-pds">"</span>mov {x}, fs:0<span class="pl-pds">"</span></span>, <span class="pl-smi">x</span> <span class="pl-k">=</span> <span class="pl-en">out</span>(<span class="pl-smi">reg</span>) <span class="pl-smi">output</span>);
+    }
+    #[cfg(target_arch <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>aarch64<span class="pl-pds">"</span></span>)]
+    <span class="pl-k">unsafe</span> {
+        <span class="pl-en">core</span><span class="pl-k">::</span><span class="pl-en">arch</span><span class="pl-k">::</span><span class="pl-en">asm!</span>(<span class="pl-s"><span class="pl-pds">"</span>mrs {x}, tpidr_el0<span class="pl-pds">"</span></span>, <span class="pl-smi">x</span> <span class="pl-k">=</span> <span class="pl-en">out</span>(<span class="pl-smi">reg</span>) <span class="pl-smi">output</span>);
+    }
+    <span class="pl-smi">output</span> <span class="pl-k">as</span> <span class="pl-smi">_</span>
+}
+</pre></div>
+<p>This takes us to another of our clone-flags <code>CLONE_SETTLS</code>, we can now allocate and supply a pointer to a
+<code>ThreadLocalStorage</code>-struct, and that will be put into the thread's thread-local storage register by the OS,
+which registers are used can be seen in <code>get_tls_ptr</code>.</p>
+<p>Now when entering the <code>panic_handler</code> we can <code>get_tls_ptr</code> and see if there is a <code>ThreadDealloc</code> associated with the
+thread that's currently panicking. If there isn't, we're on the main thread, and we'll just bail out by exiting with
+code <code>1</code>, terminating the program.
+If there is a <code>ThreadDealloc</code> we can now first check if the caller has dropped the <code>JoinHandle&#x3C;T></code>,
+and if we have exclusive access to the shared memory, if we do have exclusive access we deallocate it,
+if we don't we let the caller handle it. Then, again we have to exit with some asm:</p>
+<div class="highlight highlight-rust"><pre><span class="pl-c">// We need to be able to unmap the thread's own stack, we can't use the stack anymore after that</span>
+<span class="pl-c">// so it needs to be done in asm.</span>
+<span class="pl-c">// With the stack_ptr and stack_len in rdi/x0 and rsi/x1, respectively we can call mmap then</span>
+<span class="pl-c">// exit the thread</span>
+#[cfg(target_arch <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>x86_64<span class="pl-pds">"</span></span>)]
+<span class="pl-en">core</span><span class="pl-k">::</span><span class="pl-en">arch</span><span class="pl-k">::</span><span class="pl-en">asm!</span>(
+<span class="pl-c">// Call munmap, all args are provided in this macro call.</span>
+<span class="pl-s"><span class="pl-pds">"</span>syscall<span class="pl-pds">"</span></span>,
+<span class="pl-c">// Zero eax from munmap ret value</span>
+<span class="pl-s"><span class="pl-pds">"</span>xor eax, eax<span class="pl-pds">"</span></span>,
+<span class="pl-c">// Move exit into ax</span>
+<span class="pl-s"><span class="pl-pds">"</span>mov al, 60<span class="pl-pds">"</span></span>,
+<span class="pl-c">// Exit code 0 from thread.</span>
+<span class="pl-s"><span class="pl-pds">"</span>mov rdi, 0<span class="pl-pds">"</span></span>,
+<span class="pl-c">// Call exit, no return</span>
+<span class="pl-s"><span class="pl-pds">"</span>syscall<span class="pl-pds">"</span></span>,
+<span class="pl-en">in</span>(<span class="pl-s"><span class="pl-pds">"</span>rax<span class="pl-pds">"</span></span>) <span class="pl-c1">MUNMAP</span>,
+<span class="pl-en">in</span>(<span class="pl-s"><span class="pl-pds">"</span>rdi<span class="pl-pds">"</span></span>) <span class="pl-smi">map_ptr</span>,
+<span class="pl-en">in</span>(<span class="pl-s"><span class="pl-pds">"</span>rsi<span class="pl-pds">"</span></span>) <span class="pl-smi">map_len</span>,
+<span class="pl-en">options</span>(<span class="pl-smi">nostack</span>, <span class="pl-smi">noreturn</span>)
+);
+</pre></div>
+<p>We also need to remember to deallocate the <code>ThreadLocalStorage</code>, what we keep in the register is just a pointer to
+that allocated heap-memory. This needs to be done both in successful and panicking thread-exits.</p>
+<h2>Final thoughts</h2>
+<p>I've been dreading reinventing this particular wheel, but I'm glad I did.
+I learnt a lot, and it was interesting to dig into how threading works in practice on <code>Linux</code>, plus <code>tiny-std</code> now has
+threads!</p>
+<p>The code for threads in tiny-std can be found <a href="https://github.com/MarcusGrass/tiny-std/blob/main/tiny-std/src/thread/spawn.rs">here</a>.
+With a huge amount of comments its 500 lines.</p>
+<p>I believe that it doesn't contain <code>UB</code> or leakage, but it's incredibly hard to test, what I know is lacking is signal
+handling, which is something else that I have been dreading getting into.</p>
+<h2>Next up</h2>
+<p>I've ordered a Pinephone explorer edition, I'll probably try doing stuff with that next.</p>
+<h2>Thanks for reading!</h2>
+</div>
+</div>

@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en" xmlns="http://www.w3.org/1999/html">
+
+    <meta charset="UTF-8">
+    <base href="/">
+    <link rel="stylesheet" href="static/styles.css">
+    <link rel="stylesheet" href="static/github-markdown.css">
+    <link rel="stylesheet" href="static/starry_night.css">
+    <title>Pgwm04</title>
+
+
+<div id="menu">
+<a href=/ class="menu-item">Home</a><a href=/table-of-contents.html class="menu-item">Table of contents</a>
+</div>
+<div id="content">
+<div class="markdown-body"><h1>PGWM 0.4, io-uring, stability, and static pie linking</h1>
+<p>A while back I decided to look into io-uring for an event-loop for
+<a href="https://github.com/MarcusGrass/pgwm">pgwm</a>, I should have written
+about it when I implemented it, but couldn't find the time then.</p>
+<p>Now that I finally got <a href="https://github.com/MarcusGrass/pgwm">pgwm</a> to compile
+using the stable toolchain, I'm going to write a bit about the way there.</p>
+<h2>Io-uring</h2>
+<p><a href="https://en.wikipedia.org/wiki/Io_uring">Io-uring</a> is a linux syscall interface
+that allows you to submit io-tasks, and later collect the results of those tasks.
+It does so by providing two ring buffers, one for submissions, and one for completions.</p>
+<p>In the simplest possible terms, you put some tasks on one queue, and later collect them on some other
+queue. In practice, it's a lot less simple than that.</p>
+<p>As I've written about in previous entries on this website, I decided to scrap the std-lib and <code>libc</code>, and write
+my own syscall interface in <a href="https://github.com/MarcusGrass/tiny-std">tiny-std</a>.<br>
+Therefore I had to look into the gritty details of how to set up these buffers, you can see those details
+<a href="https://github.com/MarcusGrass/tiny-std/blob/e48179de9f11e687e5f523bb2f271b7c3bb71175/rusl/src/io_uring.rs">here</a>.
+Or, look at the c-implementation which I ripped off <a href="https://github.com/axboe/liburing">here</a>.</p>
+<h3>Why io-uring?</h3>
+<p>I've written before about my x11-wm <a href="https://github.com/MarcusGrass/pgwm">pgwm</a>, but in short:
+It's an x11-wm is based on async socket communication where the wm-reacts to incoming messages, like a key-press, and
+responds with some set of outgoing messages on that same socket.<br>
+When the WM had nothing to do it used the <code>poll</code> interface to await another message.</p>
+<p>So the loop could be summed up as:</p>
+<pre><code>1. Poll until there's a message on the socket.
+2. Read from the socket.
+3. Handle the message.
+</code></pre>
+<p>With io-uring that could be compacted to:</p>
+<pre><code>1. Read from the socket when there are bytes available.
+2. Handle the message.
+</code></pre>
+<p>io-uring sounded cool, and this seemed efficient, so off I went.</p>
+<h3>Why not io-uring?</h3>
+<p>Io-uring is complex, the set-up is complex and there are quite a few considerations that need to be made.
+Ring-buffers are set up, how big should they be? What if we get an incoming message pile-up? What if we get an
+outgoing message pile-up? When is the best time to flush the buffers? What settings should I put on the uring?</p>
+<p>There are more considerations than that, but I didn't really need to tackle most of these issues, since I'm not shipping
+a production-ready lib that I'll support indefinitely, I'm just messing around with my WM. I cranked up the buffer
+size to more than necessary, and it works fine.</p>
+<p>Something that I did consider however, was whether to use <code>SQ-poll</code>, we'll get more into that and what that is.</p>
+<h3>Sharing memory with the kernel</h3>
+<p>Something that theoretically makes Io-uring more efficient than other io-alternatives is that the ring-buffers
+are shared with the kernel. There is no need to make a separate syscall for each sent message, if you put a message
+on the buffer, and update its offset through an atomic operation, that will be available for the kernel to use.<br>
+But the kernel does need to find out about the submission outside of just the updated state.
+There are two ways of doing this:</p>
+<ol>
+<li>Make a syscall. Write an arbitrary amount of tasks to the submission queue, then tell the kernel about them through
+a syscall. That same syscall can be used to wait until there are completions available as well, it's very flexible.
+<li>Have the kernel poll the shared memory for changes in the queue-offset and pick tasks up as they're added. Potentially,
+this is a large latency-decrease as well as a throughput increase, no more waiting for syscalls!
+</ol>
+<p>I thought this sounded great, in practice however, <code>SQPoll</code> resulted in a massive cpu-usage increase. I couldn't
+tolerate that, so I'll have to save that setting for a different project.
+In the end io-uring didn't change much about pgwm.</p>
+<h2>Stable</h2>
+<p>Since I ripped out <code>libc</code>, pgwm has required nightly to build, this has bothered me quite a bit.
+The reason that the nightly compiler was necessary was because of <code>tiny-std</code> using the <code>#[naked]</code> feature to create
+the assembly entrypoint (<code>_start</code> function), where the application starts execution.</p>
+<h3>Asm to global_asm</h3>
+<p>To be able to get <code>aux</code>-values, the <code>environment variable pointer</code>, and the arguments passed to the binary, access to
+the stack-pointer at its start-position is required. Therefore, a function that doesn't mess up the stack needs to be
+injected, passing that pointer to a normal function that can extract what's necessary.</p>
+<p>An example:</p>
+<div class="highlight highlight-rust"><pre><span class="pl-c">/// Binary entrypoint</span>
+#[naked]
+#[no_mangle]
+#[cfg(all(feature <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>symbols<span class="pl-pds">"</span></span>, feature <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>start<span class="pl-pds">"</span></span>))]
+<span class="pl-k">pub</span> <span class="pl-k">unsafe</span> <span class="pl-k">extern</span> <span class="pl-s"><span class="pl-pds">"</span>C<span class="pl-pds">"</span></span> <span class="pl-k">fn</span> <span class="pl-en">_start</span>() {
+<span class="pl-c">    // Naked function making sure that main gets the first stack address as an arg</span>
+    #[cfg(target_arch <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>x86_64<span class="pl-pds">"</span></span>)]
+    {
+        <span class="pl-en">core</span><span class="pl-k">::</span><span class="pl-en">arch</span><span class="pl-k">::</span><span class="pl-en">asm!</span>(<span class="pl-s"><span class="pl-pds">"</span>mov rdi, rsp<span class="pl-pds">"</span></span>, <span class="pl-s"><span class="pl-pds">"</span>call __proxy_main<span class="pl-pds">"</span></span>, <span class="pl-en">options</span>(<span class="pl-smi">noreturn</span>))
+    }
+    #[cfg(target_arch <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>aarch64<span class="pl-pds">"</span></span>)]
+    {
+        <span class="pl-en">core</span><span class="pl-k">::</span><span class="pl-en">arch</span><span class="pl-k">::</span><span class="pl-en">asm!</span>(<span class="pl-s"><span class="pl-pds">"</span>MOV X0, sp<span class="pl-pds">"</span></span>, <span class="pl-s"><span class="pl-pds">"</span>bl __proxy_main<span class="pl-pds">"</span></span>, <span class="pl-en">options</span>(<span class="pl-smi">noreturn</span>))
+    }
+}
+<span class="pl-c">/// Called with a pointer to the top of the stack</span>
+#[no_mangle]
+#[cfg(all(feature <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>symbols<span class="pl-pds">"</span></span>, feature <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>start<span class="pl-pds">"</span></span>))]
+<span class="pl-k">unsafe</span> <span class="pl-k">fn</span> <span class="pl-en">__proxy_main</span>(<span class="pl-smi">stack_ptr</span><span class="pl-k">:</span> <span class="pl-k">*const</span> <span class="pl-en">u8</span>) {
+<span class="pl-c">    // Fist 8 bytes is a u64 with the number of arguments</span>
+    <span class="pl-k">let</span> <span class="pl-smi">argc</span> <span class="pl-k">=</span> <span class="pl-k">*</span>(<span class="pl-smi">stack_ptr</span> <span class="pl-k">as</span> <span class="pl-k">*const</span> <span class="pl-en">u64</span>);
+<span class="pl-c">    // Directly followed by those arguments, bump pointer by 8</span>
+    <span class="pl-k">let</span> <span class="pl-smi">argv</span> <span class="pl-k">=</span> <span class="pl-smi">stack_ptr</span><span class="pl-k">.</span><span class="pl-en">add</span>(<span class="pl-c1">8</span>) <span class="pl-k">as</span> <span class="pl-k">*const</span> <span class="pl-k">*const</span> <span class="pl-en">u8</span>;
+    <span class="pl-k">let</span> <span class="pl-smi">ptr_size</span> <span class="pl-k">=</span> <span class="pl-en">core</span><span class="pl-k">::</span><span class="pl-en">mem</span><span class="pl-k">::</span><span class="pl-en">size_of</span><span class="pl-k">::</span>&#x3C;<span class="pl-en">usize</span>>();
+<span class="pl-c">    // Directly followed by a pointer to the environment variables, it's just a null terminated string.</span>
+<span class="pl-c">    // This isn't specified in Posix and is not great for portability, but we're targeting Linux so it's fine</span>
+    <span class="pl-k">let</span> <span class="pl-smi">env_offset</span> <span class="pl-k">=</span> <span class="pl-c1">8</span> <span class="pl-k">+</span> <span class="pl-smi">argc</span> <span class="pl-k">as</span> <span class="pl-en">usize</span> <span class="pl-k">*</span> <span class="pl-smi">ptr_size</span> <span class="pl-k">+</span> <span class="pl-smi">ptr_size</span>;
+<span class="pl-c">    // Bump pointer by combined offset</span>
+    <span class="pl-k">let</span> <span class="pl-smi">envp</span> <span class="pl-k">=</span> <span class="pl-smi">stack_ptr</span><span class="pl-k">.</span><span class="pl-en">add</span>(<span class="pl-smi">env_offset</span>) <span class="pl-k">as</span> <span class="pl-k">*const</span> <span class="pl-k">*const</span> <span class="pl-en">u8</span>;
+    <span class="pl-k">unsafe</span> {
+        <span class="pl-c1">ENV</span><span class="pl-k">.</span>arg_c <span class="pl-k">=</span> <span class="pl-smi">argc</span>;
+        <span class="pl-c1">ENV</span><span class="pl-k">.</span>arg_v <span class="pl-k">=</span> <span class="pl-smi">argv</span>;
+        <span class="pl-c1">ENV</span><span class="pl-k">.</span>env_p <span class="pl-k">=</span> <span class="pl-smi">envp</span>;
+    }
+    <span class="pl-k">...</span><span class="pl-smi">etc</span>
+</pre></div>
+<p>I got this from an article by <a href="https://fasterthanli.me/">fasterthanli.me</a>. But later realized that
+you can use the <code>global_asm</code>-macro to generate the full function instead:</p>
+<div class="highlight highlight-rust"><pre><span class="pl-c">// Binary entrypoint</span>
+#[cfg(all(feature <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>symbols<span class="pl-pds">"</span></span>, feature <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>start<span class="pl-pds">"</span></span>, target_arch <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>x86_64<span class="pl-pds">"</span></span>))]
+<span class="pl-en">core</span><span class="pl-k">::</span><span class="pl-en">arch</span><span class="pl-k">::</span><span class="pl-en">global_asm!</span>(
+    <span class="pl-s"><span class="pl-pds">"</span>.text<span class="pl-pds">"</span></span>,
+    <span class="pl-s"><span class="pl-pds">"</span>.global _start<span class="pl-pds">"</span></span>,
+    <span class="pl-s"><span class="pl-pds">"</span>.type _start,@function<span class="pl-pds">"</span></span>,
+    <span class="pl-s"><span class="pl-pds">"</span>_start:<span class="pl-pds">"</span></span>,
+    <span class="pl-s"><span class="pl-pds">"</span>mov rdi, rsp<span class="pl-pds">"</span></span>,
+    <span class="pl-s"><span class="pl-pds">"</span>call __proxy_main<span class="pl-pds">"</span></span>
+);
+</pre></div>
+<h3>Symbols</h3>
+<p>While this means that <code>tiny-std</code> itself could potentially be part of a binary compiled with stable,
+if one would like to use for example <code>alloc</code> to have an allocator, then <code>rustc</code> would start emitting symbols
+like <code>memcpy</code>. Which rust doesn't provide for some reason.</p>
+<p>The solution to the missing symbols is simple enough, these symbols are provided in the external
+<a href="https://github.com/rust-lang/compiler-builtins">compiler-builtins</a> library, but that uses a whole host of features
+that require nightly. So I copied the implementation (and license), removing dependencies on nightly features, and
+exposed the symbols in <code>tiny-std</code>.</p>
+<p>Now an application (like pgwm), can be built with the stable toolchain using <code>tiny-std</code>.</p>
+<h2>Static</h2>
+<p>In my boot-writeup I wrote about creating a minimal <code>rust</code> bootloader. A problem I encountered was that it needed
+an interpreter. You can't see it with ldd:</p>
+<div class="highlight highlight-shell"><pre>[21:55:04 gramar@grarch marcusgrass.github.io]$ ldd ../pgwm/target/x86_64-unknown-linux-gnu/lto/pgwm
+        statically linked
+</pre></div>
+<p>Ldd lies (or maybe technically not), using <code>file</code>:</p>
+<div class="highlight highlight-shell"><pre>file ../pgwm/target/x86_64-unknown-linux-gnu/lto/pgwm
+../pgwm/target/x86_64-unknown-linux-gnu/lto/pgwm: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=9b54c91e5e84a8d3c90fdb9523f46e09cbf5c6e2, stripped
+</pre></div>
+<p>Or <code>readelf -S</code>:</p>
+<div class="highlight highlight-shell"><pre>
+[21:57:21 gramar@grarch marcusgrass.github.io]$ readelf -S ../pgwm/target/x86_64-unknown-linux-gnu/lto/pgwm
+There are 18 section headers, starting at offset 0x16a0b0:
+Section Headers:
+  [Nr] Name              Type             Address           Offset
+       Size              EntSize          Flags  Link  Info  Align
+  [ 0]                   NULL             0000000000000000  00000000
+       0000000000000000  0000000000000000           0     0     0
+  [ 1] .interp           PROGBITS         00000000000002a8  000002a8
+       000000000000001c  0000000000000000   A       0     0     1
+  [ 2] .note.gnu.bu[...] NOTE             00000000000002c4  000002c4
+       0000000000000024  0000000000000000   A       0     0     4
+  [ 3] .gnu.hash         GNU_HASH         00000000000002e8  000002e8
+       000000000000001c  0000000000000000   A       4     0     8
+  [ 4] .dynsym           DYNSYM           0000000000000308  00000308
+       0000000000000018  0000000000000018   A       5     1     8
+  [ 5] .dynstr           STRTAB           0000000000000320  00000320
+       0000000000000001  0000000000000000   A       0     0     1
+  [ 6] .rela.dyn         RELA             0000000000000328  00000328
+       0000000000008310  0000000000000018   A       4     0     8
+  [ 7] .text             PROGBITS         0000000000009000  00009000
+       000000000013d5a4  0000000000000000  AX       0     0     16
+  [ 8] .rodata           PROGBITS         0000000000147000  00147000
+       000000000000eb20  0000000000000000   A       0     0     32
+  [ 9] .eh_frame_hdr     PROGBITS         0000000000155b20  00155b20
+       0000000000001a8c  0000000000000000   A       0     0     4
+  [10] .eh_frame         PROGBITS         00000000001575b0  001575b0
+       000000000000c1dc  0000000000000000   A       0     0     8
+  [11] .gcc_except_table PROGBITS         000000000016378c  0016378c
+       000000000000000c  0000000000000000   A       0     0     4
+  [12] .data.rel.ro      PROGBITS         0000000000164e28  00163e28
+       0000000000006088  0000000000000000  WA       0     0     8
+  [13] .dynamic          DYNAMIC          000000000016aeb0  00169eb0
+       0000000000000110  0000000000000010  WA       5     0     8
+  [14] .got              PROGBITS         000000000016afc0  00169fc0
+       0000000000000040  0000000000000008  WA       0     0     8
+  [15] .data             PROGBITS         000000000016b000  0016a000
+       0000000000000008  0000000000000000  WA       0     0     8
+  [16] .bss              NOBITS           000000000016b008  0016a008
+       0000000000000458  0000000000000000  WA       0     0     8
+  [17] .shstrtab         STRTAB           0000000000000000  0016a008
+       00000000000000a8  0000000000000000           0     0     1
+</pre></div>
+<p>Both <code>file</code> and <code>readelf</code> (<code>.interp</code> section) shows that this binary needs an interpreter, that being
+<code>/lib64/ld-linux-x86-64.so.2</code>. If the binary is run in an environment without it, it
+will immediately crash.</p>
+<p>If compiled statically with <code>RUSTFLAGS='-C target-feature=+crt-static'</code> the application segfaults, oof.</p>
+<p>I haven't found out the reason why <code>tiny-std</code> cannot run as a
+<a href="https://en.wikipedia.org/wiki/Position-independent_code">position-independent</a> executable,
+or I know why, all the addresses to symbols (like static variables) are wrong. What I don't know yet is
+how to fix it.</p>
+<p>There is a no-code way of fixing it though: <code>RUSTFLAGS='-C target-feature=+crt-static -C relocation-model=static'</code>.<br>
+This way the application will be statically linked, without requiring an interpreter, but it will not be
+position independent.</p>
+<p>If you know how to make that work, please tell me, because figuring that out isn't easy.</p>
+<h2>Future plans</h2>
+<p>I'm tentatively looking into making threading work, but that is a lot of work and a
+lot of segfaults on the way.</p>
+</div>
+</div>

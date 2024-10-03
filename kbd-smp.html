@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en" xmlns="http://www.w3.org/1999/html">
+
+    <meta charset="UTF-8">
+    <base href="/">
+    <link rel="stylesheet" href="static/styles.css">
+    <link rel="stylesheet" href="static/github-markdown.css">
+    <link rel="stylesheet" href="static/starry_night.css">
+    <title>KbdSmp</title>
+
+
+<div id="menu">
+<a href=/ class="menu-item">Home</a><a href=/table-of-contents.html class="menu-item">Table of contents</a>
+</div>
+<div id="content">
+<div class="markdown-body"><h1>Symmetric multiprocessing in your keyboard</h1>
+<p>While my daughter sleeps during my parental leave I manage to get up to
+more than I thought I would. This time, a deep-dive into <a href="https://docs.qmk.fm/#/">QMK</a>.</p>
+<h2>Overview</h2>
+<p>This writeup is about how I enabled multicore processing on my keyboard,
+the structure is as follows:</p>
+<ol>
+<li>A short intro to <code>QMK</code>.
+<li>A dive into keyboards, briefly how they function.
+<li>Microcontrollers and how they interface with the keyboard.
+<li>Threading on Chibios.
+<li>Multithread vs multicore, concurrency vs parallelism.
+<li>Tying it together.
+</ol>
+<h2>QMK and custom keyboards</h2>
+<p><code>QMK</code> contains open source firmware for keyboards, it provides implementations for most custom keyboard functionality,
+like key presses (that one's obvious), rotary encoders, and oled screens.</p>
+<p>It can be thought of as an OS for your keyboard, which can be configured by plain <code>json</code>,
+with <a href="https://config.qmk.fm/#/xelus/kangaroo/rev1/LAYOUT_ansi_split_bs_rshift">online tools</a>, and other
+simple tools that you don't need to be able to program to use.</p>
+<p>But, you can also get right into it if you want, which is where it gets interesting.</p>
+<h2>Qmk structure</h2>
+<p>Saying that <code>QMK</code> is like an OS for your keyboard might drive some pedantics mad, since <code>QMK</code> packages
+an OS and installs it configured on your keyboard, with your additions.</p>
+<p>Most features are toggled by defining constants in different <code>make</code> or header files, like:</p>
+<div class="highlight highlight-c"><pre>#<span class="pl-k">pragma</span> once
+<span class="pl-c">// Millis</span>
+#<span class="pl-k">define</span> <span class="pl-en">OLED_UPDATE_INTERVAL</span> <span class="pl-c1">50</span>
+#<span class="pl-k">define</span> <span class="pl-en">OLED_SCROLL_TIMEOUT</span> <span class="pl-c1">0</span>
+#<span class="pl-k">define</span> <span class="pl-en">ENCODER_RESOLUTION</span> <span class="pl-c1">2</span>
+<span class="pl-c">// Need to propagate oled data to right side</span>
+#<span class="pl-k">define</span> <span class="pl-en">SPLIT_TRANSACTION_IDS_USER</span> OLED_DATA_SYNC
+</pre></div>
+<p>It also exposes some API's which provide curated functionality,
+here's an example from the <a href="https://github.com/qmk/qmk_firmware/blob/master/drivers/oled/oled_driver.h">oled driver</a>:</p>
+<div class="highlight highlight-c"><pre><span class="pl-c">// Writes a string to the buffer at current cursor position</span>
+<span class="pl-c">// Advances the cursor while writing, inverts the pixels if true</span>
+<span class="pl-k">void</span> <span class="pl-en">oled_write</span>(<span class="pl-k">const</span> <span class="pl-k">char</span> *data, <span class="pl-k">bool</span> invert);
+</pre></div>
+<p>Above is an API that allows you to write text to an <code>oled</code> screen, very convenient.</p>
+<p>Crucially, <code>QMK</code> does actually ship an OS, in my case <a href="https://chibiforge.org/doc/21.11/full_rm/">chibios</a>.
+Chibios is a full-featured <a href="https://en.wikipedia.org/wiki/Real-time_operating_system">RTOS</a>. That OS contains
+the drivers for my microcontrollers, and from my custom code I can interface with
+the operating system.</p>
+<h2>Keyboards keyboards keyboards</h2>
+<p>I have been building keyboards since I started working as a programmer.
+There is much that can be said about them, but not a lot of it is particularly interesting. I'll give a brief
+explanation of how they work.</p>
+<h3>Keyboard internals</h3>
+<p>A keyboard is like a tiny computer that tells the OS (The other one, the one not in the keyboard)
+what keys are being pressed.</p>
+<p>Here are three arbitrarily chosen important components to a keyboard:</p>
+<ol>
+<li>The <a href="https://en.wikipedia.org/wiki/Printed_circuit_board">Printed Circuit Board (PCB)</a>, it's a large
+chip that connects all the keyboard components. If you're thinking: "Hey that's a motherboard!", then you
+aren't far off. Split keyboards (usually) have two PCBs working in tandem, connected by (usually) an aux cable.
+<li>The microcontroller, the actual computer part that you program. It can be integrated directly with the PCB,
+or soldered on to it.
+<li><a href="https://en.wikipedia.org/wiki/Keyboard_technology#Notable_switch_mechanisms">The switches</a>,
+the things that when pressed connects circuits on the PCB, which the microcontroller can see
+and interpret as a key being pressed.
+</ol>
+<h2>Back to the story</h2>
+<p>I used an <a href="https://keeb.io/collections/iris-split-ergonomic-keyboard">Iris</a> for years and loved it, but since some pretty impressive microcontrollers that aren't <a href="https://en.wikipedia.org/wiki/AVR_microcontrollers">AVR</a>,
+but <a href="https://en.wikipedia.org/wiki/ARM_architecture_family">ARM</a> came out, surpassing the AVR ones in cost-efficiency, memory, and speed, while being compatible,
+I felt I needed an upgrade.</p>
+<p>A colleague tipped me off about <a href="https://splitkb.com/products/aurora-lily58">lily58</a>, which takes any <a href="https://github.com/sparkfun/Pro_Micro">pro-micro</a>-compatible microcontroller,
+so I bought it. Alongside a couple of <a href="https://www.raspberrypi.com/documentation/microcontrollers/rp2040.html">RP2040</a>-based microcontrollers.</p>
+<h3>RP2040 and custom microcontrollers</h3>
+<p>Another slight derailment, the RP2040 microcontroller is a microcontroller with an
+<a href="https://developer.arm.com/Processors/Cortex-M0-Plus">Arm-cortex-m0+ cpu</a>. Keyboard-makers take this kind
+of microcontroller, and customize them to fit keyboards, since pro-micro microcontrollers have influenced a lot
+of the keyboard PCBs, many new microcontroller designs fit onto a PCB the same way that a pro-micro does. Meaning,
+often you can use many combinations of microcontrollers, with many combinations of PCBs.</p>
+<p>The arm-cortex-m0+ cpu is pretty fast, cheap, and has two cores, TWO CORES, why would someone even need that?
+But, if there are two cores on there, then they should both definitely be used.</p>
+<h2>Back to the story, pt2</h2>
+<p>I was finishing up my keyboard and realized that <code>oled</code>-rendering is by default set to 50ms, to not impact
+matrix scan rate. (The matrix scan rate is when the microcontroller checks the PCB for what keys are being held down,
+if it takes too long it may impact the core functionality of key-pressing and releasing being registered correctly).</p>
+<p>Now I found the purpose of multicore, if rendering to the oled takes time,
+then that job could (and therefore should) be shoveled onto a
+different thread. My keyboard has 2 cores, I should parallelize this by using a thread!</p>
+<h2>Chibios and threading</h2>
+<p>Chibios is very well documented; it even
+<a href="https://chibiforge.org/doc/21.11/full_rm/group__threads.html">has a section on threading</a>, and it even has a
+convenience function for
+<a href="https://chibiforge.org/doc/21.11/full_rm/group__threads.html#gabf1ded9244472b99cef4dfa54caecec4">spawning a static thread</a>.</p>
+<p>It can be used like this:</p>
+<div class="highlight highlight-c"><pre><span class="pl-k">static</span> <span class="pl-en">THD_WORKING_AREA</span>(my_thread_area, <span class="pl-c1">512</span>);
+<span class="pl-k">static</span> <span class="pl-en">THD_FUNCTION</span>(my_thread_fn, arg) {
+    <span class="pl-c">// Cool function body</span>
+}
+<span class="pl-k">void</span> <span class="pl-en">start_worker</span>(<span class="pl-k">void</span>) {
+    <span class="pl-c1">thread_t</span> *thread_ptr = <span class="pl-c1">chThdCreateStatic</span>(my_thread_area, <span class="pl-c1">512</span>, NORMALPRIO, my_thread_fn, <span class="pl-c1">NULL</span>);
+}
+</pre></div>
+<p>Since my CPU has two cores, if I spawn a thread, work will be parallelized, I thought, so I went for it. (This is
+foreshadowing).</p>
+<p>After wrangling some <a href="https://chibiforge.org/doc/21.11/full_rm/group__mutexes.html">mutex locks</a>, and messing
+with the firmware to remove race conditions, I had a multithreaded implementation that could offload rendering
+to the <code>oled</code> display on a separate thread, great! Now why is performance so bad?</p>
+<h2>Multithread != Multicore, an RTOS is not the same as a desktop OS</h2>
+<p>When I printed the core-id of the thread rendering to the <code>oled</code>-display, it was <code>0</code>. I wasn't
+actually using the extra core which would have core-id <code>1</code>.</p>
+<p>The assumption that:</p>
+<blockquote>
+<p>If I have two cores and I have two threads, the two threads should be running
+or at least be available to accept tasks almost 100% of the time.</p>
+</blockquote>
+<p>does not hold here.
+It would hold up better on a regular OS like <code>Linux</code>, but on <code>Chibios</code> it's a bit more explicit.</p>
+<p><strong>Note:</strong>
+Disregarding that <code>Chibios</code> spawns both a main-thread, and an idle-thread (on the same core) by default, so it's not just one,
+although that's not particularly important to performance.</p>
+<h3>On concurrency vs parallelism</h3>
+<p>Threading without multiprocessing can produce concurrency, like in <a href="https://www.python.org/">Python</a> with
+the <a href="https://wiki.python.org/moin/GlobalInterpreterLock">GIL</a> enabled. A programmer can run multiple tasks at the same time and if those tasks don't
+require CPU-time, such as waiting for some io, the tasks can make progress at the same time, which
+is why Python with the GIL can run webservers pretty well. However, tasks that require CPU-time to make
+progress will not benefit from having more threads in the single-core case.</p>
+<p>One more caveat are blocking tasks that do not park the thread, this will come down to how to the OS decides to schedule
+things: In a single-core scenario, the main thread offloads some io-work to a separate thread,
+the OS schedules (simplified) 1 millisecond to the io-thread, but that thread is stuck waiting for io to complete,
+the application will make no progress for that millisecond.
+One way to mitigate this is to park the waiting thread inside the
+io-api, then waking it up on some condition, in that case the blocking io won't hang the application.</p>
+<p>In my case, SMP not being enabled meant that the oled-drawer-thread just got starved of CPU-time resulting in
+drawing to the oled being painfully slow, but even if it hadn't been, there may have been a performance hit because
+it could have interfered with the regular key-processing.</p>
+<h3>Parallelism</h3>
+<p>I know I have two cores, parallelism should therefore be possible, I'll just have to enable
+<a href="https://en.wikipedia.org/wiki/Symmetric_multiprocessing">Symmetric multiprocessing(SMP)</a>.
+SMP means that the processor can actually do things in parallel.
+It's not enabled by default, Chibios has some <a href="https://www.chibios.org/dokuwiki/doku.php?id=chibios:articles:smp_rt7">documentation on this</a>.</p>
+<p>Enabling SMP is not trivial as it turns out, it needs a config flag for chibios,
+a makeflag when building for the platform (rp2040), and some other fixing.
+So I had to mess with the firmware once more,
+but checking some flags in the code, and some internal structures, I can see that <code>Chibios</code> is now compiled
+ready to use SMP, it even has a reference that I can use to my other core's context <code>&#x26;ch1</code> (<code>&#x26;ch0</code> is core 0).</p>
+<p>On <code>Linux</code> multicore and multithreading is opaque, you spawn a thread, it runs on some core (also assuming that
+SMP is enabled, but it generally is for servers and desktops). On Chibios, if you
+spawn a thread, it runs on the core that spawned it by default.</p>
+<p>Back to the docs, I see that I can instead create a thread from a <a href="https://chibiforge.org/doc/21.11/full_rm/group__threads.html#gad51eb52a2e308ba1cb6e5cd8a337817e">thread descriptor</a>,
+which takes a reference to the instance-context, <code>&#x26;ch1</code>. Perfect, now I'll spawn a thread on the other core, happily ever
+after.</p>
+<p><strong>WRONG!</strong></p>
+<p>It still draws from core-0 on the oled.</p>
+<p>Checking the chibios source code, I see that it falls back to <code>&#x26;ch0</code> if <code>&#x26;ch1</code> is <code>null</code>, now why is it <code>null</code>?</p>
+<h3>Main 2, a single main function is for suckers</h3>
+<p>Browsing through the chibios repo I find <a href="https://github.com/ChibiOS/ChibiOS/blob/master/demos/RP/RT-RP2040-PICO/c1_main.c">the next piece of the puzzle</a>,
+a demo someone made of SMP on the RP2040, it needs a separate main function where the instance context (<code>&#x26;ch1</code>)
+for the new core is initialized. I write some shim-code, struggle with some more configuration, and finally,
+core 1 is doing the <code>oled</code> work.</p>
+<p>Performance is magical, it's all worth it in the end.</p>
+<h2>Conclusion</h2>
+<p>My keyboard now runs multicore and I've offloaded all non-trivial
+work to core 1 so that core 0 can do the time-sensitive matrix scanning,
+and I can draw as much and often as I want to the oled display.</p>
+<p>I had to mess a bit with the firmware to specify that there is an extra
+core on the RP2040, and to keep <code>QMK</code>s hands off of oled state, since
+that code isn't thread-safe.</p>
+<p>In reality this kind of optimization probably isn't necessary for most users,
+but if there is work that the keyboard is doing
+that's triggered by key processing, such as rgb-animations, oled-animations, and similar. Offloading that
+to a separate core could improve performance, allowing more of that kind of work for a given keyboard.</p>
+<p>The code is in my fork <a href="https://github.com/MarcusGrass/qmk_firmware/tree/mg/lily58">here</a>,
+with commits labeled <code>[FIRMWARE]</code> being the ones messing with the firmware.</p>
+<p>The keyboard-specific code is contained
+<a href="https://github.com/MarcusGrass/qmk_firmware/tree/mg/lily58/keyboards/splitkb/aurora/lily58/keymaps/gramar">here</a>,
+on the same branch.</p>
+<p>I hope this was interesting to someone!</p>
+</div>
+</div>

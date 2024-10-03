@@ -1,0 +1,818 @@
+<!DOCTYPE html>
+<html lang="en" xmlns="http://www.w3.org/1999/html">
+
+    <meta charset="UTF-8">
+    <base href="/">
+    <link rel="stylesheet" href="static/styles.css">
+    <link rel="stylesheet" href="static/github-markdown.css">
+    <link rel="stylesheet" href="static/starry_night.css">
+    <title>RustKbd</title>
+
+
+<div id="menu">
+<a href=/ class="menu-item">Home</a><a href=/table-of-contents.html class="menu-item">Table of contents</a>
+</div>
+<div id="content">
+<div class="markdown-body"><h1>Building keyboard firmware in Rust, an embedded journey</h1>
+<p><a href="/kbd-smp">Last time</a>, I wrote about enabling Symmetric Multiprocessing on a keyboard using
+<a href="https://qmk.fm/">QMK</a> (and <a href="https://www.chibios.org/dokuwiki/doku.php">Chibios</a>).<br>
+This was discovered to be a bad idea, as I was told by a maintainer, or at least the way I was doing it, QMK
+is not made for multithreading (yet).</p>
+<p>My daughter sleeps a lot during the days, so I decided to step up the level of ambition a bit:
+Can keyboard firmware be reasonably written from "scratch" using Rust, I asked myself, and found out that it can.</p>
+<h2>Overview</h2>
+<p>This writeup is about how I wrote multicore firmware using Rust for a <a href="https://splitkb.com/products/aurora-lily58?variant=43553010090243">lily58 PCB</a>,
+and a <a href="https://splitkb.com/products/liatris?_pos=1&#x26;_sid=9363d742f&#x26;_ss=r">Liatris</a> (<a href="https://www.raspberrypi.com/products/rp2040/">rp2040-based</a>)
+microcontroller. The code for it is <a href="https://github.com/MarcusGrass/rp2040-kbd">here</a>.</p>
+<ol>
+<li>Callback to the last writeup
+<li>Embedded on Rust
+<li>Development process (Serial interfaces)
+<li>Figuring out the MCU&#x3C;->PCB interplay using QMK
+<li>Split keyboard communication woes
+<li>Keymaps
+<li>USB HID Protocol
+<li>OLED displays
+<li>BUUUUGS
+<li>Performance
+<li>Epilogue
+</ol>
+<h2>On the last episode of 'Man wastes time reinventing wheel'</h2>
+<p>Last time I did a pretty thorough dive into QMK, explaining keyboard basics, and most of the jargon used.<br>
+I'm not going to be as thorough this time, but briefly:</p>
+<h3>Enthusiast keyboards</h3>
+<p>There are communities building enthusiast keyboards, often soldering components together themselves, and tailoring their
+own firmware to fit their needs (or wants).</p>
+<p>Generally, a keyboard consists of the PCB, microcontroller (sometimes integrated with the PCB), switches that go on the PCB,
+and keycaps that go on the switches. Split keyboards are also fairly popular, those keyboards generally have two separate PCBs
+that are connected to each other by wire, I've been using the split keyboard
+<a href="https://keeb.io/collections/iris-split-ergonomic-keyboard">iris</a> for a long time.
+There are also peripherals, such as <a href="https://keeb.io/products/rotary-encoder-ec11?_pos=1&#x26;_sid=0becfc852&#x26;_ss=r">rotary encoders</a>,
+<a href="https://en.wikipedia.org/wiki/OLED">oled</a> displays, sound emitters, RGB lights and many more that can be integrated
+with the keyboard. Pretty much any peripheral that the microcontroller can interface with is a possible add-on to
+a user's keyboard.</p>
+<h4>QMK</h4>
+<p>To get the firmware together, an open source firmware repo called QMK can be used. There are a few others but to my
+knowledge QMK is the most popular and mature alternative. You can make a keymap without writing any code at all,
+but if you want to interface with peripherals, or execute advanced logic, some C-code will be necessary.</p>
+<h3>Back to last time</h3>
+<p>I bought a microcontroller which has dual cores, and I wanted to use them to offload oled-drawing to the core that
+doesn't handle latency-sensitive activities, and did a deep dive into enabling that for my setup.
+While it worked it was not thread-safe and generally discouraged by the maintainers.</p>
+<p>That's when I decided to write my own firmware in Rust.</p>
+<h2>Embedded on Rust</h2>
+<p>I hadn't written code for embedded targets before my last foray into keyboard firmware, I had some tangential experience
+with the <a href="https://github.com/rust-embedded/heapless">heapless</a> library which exposes stack-allocated collections.
+These can be useful for performance in some cases, but very useful if you haven't got a heap at all, like you
+often will not have on embedded devices.</p>
+<p>I searched for rp2040 Rust and found <a href="https://github.com/rp-rs/rp-hal">rp-hal</a>, hal stands for Hardware
+Abstraction Layer, and the crate exposes high-level code to interface with low-level processor and peripheral functionality.</p>
+<p>For example, spawning a task on the second core, resetting to bootloader, reading <a href="https://en.wikipedia.org/wiki/General-purpose_input/output">GPIO</a>
+pins, and more. This was a good starting point, when I found this project I had already soldered together
+the keyboard and was ready to write firmware for it.</p>
+<h3>CPU and board</h3>
+<p>rp-hal provides access to the basic CPU-functionality, but that CPU is mounted on a board in itself, which has
+peripherals, in this case it's the <a href="https://splitkb.com/products/liatris">Liatris</a>, the mapping of the outputs
+of the board to code is called a Board support package (BSP), and can be put in the
+<a href="https://github.com/rp-rs/rp-hal-boards">rp-hal-boards</a> repo so that they can be shared.
+I haven't made a PR for <a href="https://github.com/marcusgrass/rp-hal-boards">my fork yet</a>,
+I'm planning to do it when I've worked out all remaining bugs in my code, but it's very much based on the
+<a href="https://github.com/rp-rs/rp-hal-boards/tree/main/boards/rp-pico">rp-pico BSP</a>.</p>
+<h2>Starting development</h2>
+<p>Now I wanted to get any firmware running just to see that it's working.</p>
+<h3>USB serial</h3>
+<p>The Liatris MCU has an integrated USB-port, I figured that the easiest way to see if the firmware boots and works
+at all was to implement some basic communication over that port, until I can get some information out of the MCU
+I'm flying completely blind.</p>
+<p>The <a href="https://github.com/rp-rs/rp-hal-boards/blob/main/boards/rp-pico/examples/pico_usb_serial.rs">rp-pico BSP examples</a>
+were excellent, using them I could set up a serial interface which just echoed back what was written to it to the OS.</p>
+<p>Hooking the serial interface up to the OS was another matter though. I compiled the firmware and
+flashed it to the keyboard by holding down the onboard boot-button and pressing reset, then went to
+figure out the OS parts.</p>
+<h4>USB CDC ACM</h4>
+<p>After some searching I realize that I need some drivers to connect to the serial device:
+USB CDC ACM, USB and two meaningless letter combinations. Together they stand for</p>
+<blockquote>
+<p>Universal Serial Bus Communication Device Class Abstract Control Model</p>
+</blockquote>
+<p>When the correct drivers are installed, and the keyboard plugged in, <a href="https://man7.org/linux/man-pages/man1/dmesg.1.html">dmesg</a>
+tells me that there's a new device under <code>/dev/ttyACM0</code>.</p>
+<div class="highlight highlight-shell"><pre><span class="pl-c1">echo</span> <span class="pl-s"><span class="pl-pds">"</span>Hello!<span class="pl-pds">"</span></span> <span class="pl-k">>></span> /dev/ttyACM0
+</pre></div>
+<p>No response.</p>
+<p>I do some more searching and find out that two-way communication with serial devices over the CDC-ACM-driver
+isn't as easy as echoing and <code>cat</code>ing a file. <a href="https://linux.die.net/man/1/minicom">minicom</a> is a program
+that can interface with this kind of device, but the UX was obtuse, looking for alternatives I found
+<a href="https://linux.die.net/man/8/picocom">picocom</a> which serves the same purpose but is slightly nicer to use:</p>
+<div class="highlight highlight-shell"><pre>[root@grentoo /home/gramar]<span class="pl-c"># picocom -b 115200 -l /dev/ttyACM0</span>
+picocom v3.1
+port is        <span class="pl-c1">:</span> /dev/ttyACM0
+flowcontrol    <span class="pl-c1">:</span> none
+baudrate is    <span class="pl-c1">:</span> 115200
+parity is      <span class="pl-c1">:</span> none
+databits are   <span class="pl-c1">:</span> 8
+stopbits are   <span class="pl-c1">:</span> 1
+escape is      <span class="pl-c1">:</span> C-a
+<span class="pl-k">local</span> <span class="pl-c1">echo</span> is  <span class="pl-c1">:</span> no
+noinit is      <span class="pl-c1">:</span> no
+noreset is     <span class="pl-c1">:</span> no
+hangup is      <span class="pl-c1">:</span> no
+nolock is      <span class="pl-c1">:</span> yes
+send_cmd is    <span class="pl-c1">:</span> sz -vv
+receive_cmd is <span class="pl-c1">:</span> rz -vv -E
+imap is        <span class="pl-c1">:</span> 
+omap is        <span class="pl-c1">:</span> 
+emap is        <span class="pl-c1">:</span> crcrlf,delbs,
+logfile is     <span class="pl-c1">:</span> none
+initstring     <span class="pl-c1">:</span> none
+exit_after is  <span class="pl-c1">:</span> not <span class="pl-c1">set</span>
+<span class="pl-c1">exit</span> is        <span class="pl-c1">:</span> no
+Type [C-a] [C-h] to see available commands
+Terminal ready
+</pre></div>
+<p>There's a connection! Enabling echo and writing <code>hello</code> gives the output <code>hHeElLlLoO</code>, the Liatris responding
+with a capitalized echo.</p>
+<h4>Making DevEx nicer</h4>
+<p>I write some code that checks the last entered characters and executes commands depending on what they are.
+First off, making a reboot easier:</p>
+<div class="highlight highlight-rust"><pre><span class="pl-k">if</span> <span class="pl-smi">last_chars</span><span class="pl-k">.</span><span class="pl-en">ends_with</span>(<span class="pl-s">b<span class="pl-pds">"</span>boot<span class="pl-pds">"</span></span>) {
+    <span class="pl-en">reset_to_usb_boot</span>(<span class="pl-c1">0</span>, <span class="pl-c1">0</span>);
+}
+</pre></div>
+<p>Great, now I can connect to the device and type boot, and it'll boot into flash-mode so that I can load new firmware
+onto it, this made iterating much faster. Since everything was soldered and mounted, I had to use a (wooden) skewer
+to reach under the oled and press the boot button on the microcontroller before this. I recommend not soldering on
+components blocking access to the boot-button if doing this kind of programming.</p>
+<h2>Developing actual keyboard functionality</h2>
+<p>There are <a href="https://docs.splitkb.com/hc/en-us/articles/6942088875292-Aurora-Lily58-schematics">schematics for the pcb</a>
+online, as well as a <a href="https://docs.splitkb.com/hc/en-us/articles/6485704310044-Elite-Pi-Technical-data">schematic of the pinout of the elite-c MCU</a>,
+which the developers told me were the same as for the Liatris, this seems to be true.</p>
+<p>Rows and columns are connected to GPIO-pins in the MCU, switches connect rows and columns, if switches are pressed a current can flow between them.
+My first thought was that if a switch that sits between <code>row0</code> and <code>col0</code> is pressed, the pin for <code>row0</code> and <code>col0</code> would read
+<code>high</code> (or <code>low</code>), that's not the case.</p>
+<h3>PullUp and PullDown resistors</h3>
+<p>Here is where my complete ignorance of embedded comes to haunt me, GPIO pins can be configured to be either PullUp or
+PullDown, what that meant was beyond me, it still is to a large extent. The crux of it is that either
+there's a resistor connected to power or ground, up or down respectively.</p>
+<p>That made some sense to me, I figure either the rows or columns should be PullUp while the other is PullDown.
+This did not produce any reasonable results either.
+At this point, I had written some debug-code which scanned all GPIO-pins and printed if their state changed, and
+I was mashing keyboard buttons with strange output as a result.</p>
+<p>I was getting frustrated with non-progress and decided to look into QMK, there's a lot of <code>__weak__</code>-linkage,
+the <a href="https://en.wikipedia.org/wiki/Weak_symbol">abstract class of C</a>, so actually following the code in QMK
+can be difficult, which is why I hadn't browsed it in more depth earlier.</p>
+<p>But I did find the problem. All pins, rows and columns, should be pulled <code>high</code> (PullUp),
+then the column that should be checked is set <code>low</code>, and then all rows are checked, if any row goes <code>low</code> then the switch
+connecting the checked column and that row is being pressed. In other words:</p>
+<p>Set <code>col0</code> to <code>low</code>, if <code>row0</code> is still <code>high</code>, switch <code>0, 0</code> top-left for example, is not pressed.
+If <code>row1</code> is now <code>low</code>, it means that switch <code>1, 0</code>, first key on the second row, is being pressed.</p>
+<p>Now I can detect which keys are being pressed, useful functionality for a keyboard.</p>
+<h3>Split keyboards</h3>
+<p>Looking back at the <a href="https://docs.splitkb.com/hc/en-us/article_attachments/8356613654940">schematic</a> I see that there's a pin
+labeled side-indicator, that either goes to ground or voltage. After a brief check it reads, as expected, <code>high</code> on the left
+side, and <code>low</code> on the right side.</p>
+<p>Now that I can detect which keys are being pressed, by coordinates, and which side is being run,
+it's time to transmit key-presses from the right-side to the left.</p>
+<p>The reason to do it that way is that the left is the side that I'm planning on connecting to the computer with a
+usb-cable. Now, I could have written to code to be side-agnostic, checking whether a USB-cable is connected and choosing
+whether to send key-presses over the wire connecting the sides, or the USB-cable. However, that approach both increases
+complexity and binary size, so I opted not to.</p>
+<h4>Stupid note</h4>
+<p>I could also have made each side a separate independent keyboard, which would have been pretty fun, but problematic
+for a lot of reasons, like using left shift pressing a right-key, I'd have to have software on the computer to patch them
+together.</p>
+<h4>Bits over serial</h4>
+<p>Looking at the schematics again, I see that one pin is labeled <code>DATA</code>, that pin is the one connected to the
+pad that the <a href="https://splitkb.com/products/coiled-angled-trrs-cable">TRRS cable</a> connects the sides with.<br>
+However, there is only one pin on each side, which means that all communication is limited to setting/reading
+<code>high</code>/<code>low</code> on a single pin. Transfer is therefore limited to one bit at a time.</p>
+<p>Looking over the default configuration for my keyboard in QMK the <a href="https://github.com/qmk/qmk_firmware/blob/master/docs/serial_driver.md">BitBang</a>
+driver is used since nothing else is specified, there are also USART, single- and full-duplex available.</p>
+<h4>UART/USART</h4>
+<p><a href="https://en.wikipedia.org/wiki/Universal_asynchronous_receiver-transmitter">UART</a> stands for Universal Asynchronous
+Receiver-Transmitter, and is a protocol (although the wiki says a peripheral device, terminology unclear)
+to send bits over a wire.</p>
+<p>There is a UART-implementation for the rp2040, in the <a href="https://github.com/rp-rs/rp-hal">rp-hal-crate</a>, but it
+assumes usage of the builtin uart-peripheral, that uses both an RX and TX-pin in a pre-defined set position, in my case
+I want to either have half-duplex communication (one side communicates at a time), or simplex communication from right
+to left. That means that the <code>DATA</code>-pin on the left side should be UART-RX (receiver) while the <code>DATA</code>-pin on
+the right is UART-TX (transmitter).</p>
+<p>I search further for single-pin UART and find out about <a href="https://tutoduino.fr/en/pio-rp2040-en/">PIO</a>.</p>
+<h4>PIO</h4>
+<p>The rp2040 has blocks with state-machines which can run like a separate processor manipulating and reading
+pin-states, these can be programmed with specific assembly, and there just happens to be someone
+who programmed a uart-implementation in that assembly <a href="https://github.com/raspberrypi/pico-examples/blob/master/pio/uart_rx/uart_rx.pio">here</a>.</p>
+<p>It also turns out that someone ported that implementation to a Rust library <a href="https://github.com/Sympatron/pio-uart">here</a>.</p>
+<p>I hooked up the RX-part to the left side, and the TX to the right, and it worked!</p>
+<p><em>Note</em></p>
+<p>You could probably make a single-pin half-duplex uart implementation by modifying the above pio-asm by not that much.
+You'd just have to figure out how to wait on either data in the input register from the user program, or communication
+starting from the other side. There's a race-condition there though, maybe I'll get to that later.</p>
+<h4>Byte-protocol</h4>
+<p>Since I'm using hardware to send data bit-by-bit I made a slimmed-down protocol. The right side has 28 buttons and a
+rotary-encoder. A delta can be fit into a single byte.</p>
+<hr>
+<p><em>Edit 2024-04-17</em></p>
+<p>Changed this to two bytes, where the content is sandwitched between a header and footer like this:</p>
+<div class="highlight highlight-rust"><pre><span class="pl-k">const</span> <span class="pl-c1">HEADER</span><span class="pl-k">:</span> <span class="pl-en">u16</span> <span class="pl-k">=</span> <span class="pl-c1">0b0101_0000_0000_0000</span>;
+<span class="pl-k">const</span> <span class="pl-c1">FOOTER</span><span class="pl-k">:</span> <span class="pl-en">u16</span> <span class="pl-k">=</span> <span class="pl-c1">0b0000_0000_0000_0101</span>;
+<span class="pl-c">// convert 8 bit msg into 16 bits, shift it 4 to the left</span>
+<span class="pl-c">// Then OR with header and footer to create 16 bits with the actual message at the middle</span>
+<span class="pl-k">let</span> <span class="pl-smi">msg</span> <span class="pl-k">=</span> ((<span class="pl-smi">byte_to_send</span> <span class="pl-k">as</span> <span class="pl-en">u16</span>) <span class="pl-k">&#x3C;&#x3C;</span> <span class="pl-c1">4</span>) <span class="pl-k">|</span> <span class="pl-c1">HEADER</span> <span class="pl-k">|</span> <span class="pl-c1">FOOTER</span>;
+</pre></div>
+<p>The reason is that if the right-side is disconnected and reconnected, the lowering and then
+raising of the uart-pin becomes a valid message, but it'll be wrong. Either it will be all <code>0s</code> or all <code>1s</code>
+at the head or tail of the message, which these bit-patterns eliminate.</p>
+<hr>
+<p>Visualizing the keyboard's keys as a matrix with <code>5</code> rows, and <code>6</code> columns there's at most 30 keys.
+The keys can be translated into a matrix-index where <code>0,0</code> => <code>0</code>, <code>1,0</code> -> <code>6</code>, <code>2, 3</code> -> <code>15</code>, by rolling out
+the <code>2d</code>-array into a <code>1d</code> one.</p>
+<p>In the protocol, the first 5 bits gives the matrix-index of the key that changed. The 6th bit is whether
+that key was pressed or released, the 7th bit indicates whether the rotary-encoder has a change, and the 8th
+bit indicates whether that change was clock- or counter-clockwise.</p>
+<p>For better or worse, almost all bit-patterns are valid, some may represent keys that do not exist, since there are
+28 keys, but 32 slots for the 5 bits indicating the matrix-index.</p>
+<p>I used the <a href="https://docs.rs/bitvec/latest/bitvec/">bitvec</a> crate for bit-manipulation when prototyping,
+that library is excellent.<br>
+I warmly recommend it, even though I went with a more custom solution for performance reasons (I made some
+specific optimizations to my use-case, see 'Performance').</p>
+<h2>Keymap</h2>
+<p>Now, to send key-presses to the OS, <a href="https://docs.rs/usbd-hid/latest/usbd_hid/">of course there's a crate for that</a>.</p>
+<p>It helps with the plumbing and exposes the struct that I've got to send to the OS (and the API to do the sending),
+I just have to fill it with reasonable values:</p>
+<div class="highlight highlight-rust"><pre><span class="pl-c">/// Struct that the OS wants</span>
+<span class="pl-k">pub</span> <span class="pl-k">struct</span> <span class="pl-en">KeyboardReport</span> {
+    <span class="pl-k">pub</span> <span class="pl-smi">modifier</span><span class="pl-k">:</span> <span class="pl-en">u8</span>,
+    <span class="pl-k">pub</span> <span class="pl-smi">reserved</span><span class="pl-k">:</span> <span class="pl-en">u8</span>,
+    <span class="pl-k">pub</span> <span class="pl-smi">leds</span><span class="pl-k">:</span> <span class="pl-en">u8</span>,
+    <span class="pl-k">pub</span> <span class="pl-smi">keycodes</span><span class="pl-k">:</span> [<span class="pl-en">u8</span>; <span class="pl-c1">6</span>],
+}
+</pre></div>
+<p>I found <a href="https://usb.org/sites/default/files/hut1_3_0.pdf">this pdf from usb.org</a>, which specifies keycode and modifier
+values. I encoded those <a href="https://github.com/MarcusGrass/rp2040-kbd/blob/main/rp2040-kbd/src/hid/keycodes.rs#L3">as a struct</a>.</p>
+<div class="highlight highlight-rust"><pre>#[repr(transparent)]
+#[derive(<span class="pl-en">Copy</span>, <span class="pl-en">Clone</span>, <span class="pl-en">Debug</span>, <span class="pl-en">Eq</span>, <span class="pl-en">PartialEq</span>)]
+<span class="pl-k">pub</span> <span class="pl-k">struct</span> <span class="pl-en">KeyCode</span>(<span class="pl-k">pub</span> <span class="pl-en">u8</span>);
+#[allow(dead_code)]
+<span class="pl-k">impl</span> <span class="pl-en">KeyCode</span> {
+<span class="pl-c">    //Keyboard = 0x01; //ErrorRollOver1 Sel N/A 3 3 3 4/101/104</span>
+<span class="pl-c">    //Keyboard = 0x02; //POSTFail1 Sel N/A 3 3 3 4/101/104</span>
+<span class="pl-c">    //Keyboard = 0x03; //ErrorUndefined1 Sel N/A 3 3 3 4/101/104</span>
+    <span class="pl-k">pub</span> <span class="pl-k">const</span> <span class="pl-c1">A</span><span class="pl-k">:</span> <span class="pl-c1">Self</span> <span class="pl-k">=</span> <span class="pl-c1">Self</span>(<span class="pl-c1">0x04</span>);<span class="pl-c"> //a and A2 Sel 31 3 3 3 4/101/104</span>
+    <span class="pl-k">pub</span> <span class="pl-k">const</span> <span class="pl-c1">B</span><span class="pl-k">:</span> <span class="pl-c1">Self</span> <span class="pl-k">=</span> <span class="pl-c1">Self</span>(<span class="pl-c1">0x05</span>);<span class="pl-c"> //b and B Sel 50 3 3 3 4/101/104</span>
+<span class="pl-c">    // ... etc etc etc</span>
+</pre></div>
+<p>Now I know which button is pressed by coordinates, and how to translate those to values that the OS can understand.</p>
+<p>And it works! Kind of...</p>
+<h3>USB HID Protocol?</h3>
+<p>I will admit that I did not read the entire PDF, what I did find out was that there's a poll-rate that the OS specifies,
+I set that at the lowest possible value, 1ms. Each 1 ms the OS triggers an interrupt:</p>
+<div class="highlight highlight-rust"><pre><span class="pl-c">/// Interrupt handler</span>
+<span class="pl-c">/// Safety: Called from the same core that publishes</span>
+#[interrupt]
+#[allow(non_snake_case)]
+#[cfg(feature <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>hiddev<span class="pl-pds">"</span></span>)]
+<span class="pl-k">unsafe</span> <span class="pl-k">fn</span> <span class="pl-en">USBCTRL_IRQ</span>() {
+    <span class="pl-k">crate::</span><span class="pl-en">runtime</span><span class="pl-k">::</span><span class="pl-en">shared</span><span class="pl-k">::</span><span class="pl-en">usb</span><span class="pl-k">::</span><span class="pl-en">hiddev_interrupt_poll</span>();
+}
+</pre></div>
+<h4>Oh right, interrupts</h4>
+<p><a href="https://en.wikipedia.org/wiki/Interrupt">Interrupts</a> are ways for the processor to interrupt current executing code
+and executing something else, interrupt handlers are similar to <a href="https://man7.org/linux/man-pages/man7/signal.7.html">Linux signal handlers</a>.</p>
+<p>In this specific case, the USB-peripheral generates an interrupt when polled, the core that registered an interrupt
+handler for that specific interrupt (<code>USBCTRL_IRQ</code>) will pause current execution and run the code contained in
+the interrupt-handler.</p>
+<p>This has potential of triggering UB with unsafe code (depending on where the core was stopped, it may have been holding
+a mutable reference which the interrupt handler needs), and deadlocks with code that guards against multiple mutable
+references through locking.</p>
+<p>One way to handle this, if using mutable statics (which you almost certainly have to without an allocator),
+is to execute sensitive code within a <code>critical_section</code>, of course,
+<a href="https://docs.rs/critical-section/latest/critical_section/">there's a library for that</a>.<br>
+The critical-section, when entered, causes the core to ignore interrupts until exited.</p>
+<div class="highlight highlight-rust"><pre><span class="pl-c">// Both of these functions use the same static mut variable</span>
+#[cfg(feature <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>hiddev<span class="pl-pds">"</span></span>)]
+<span class="pl-k">pub</span> <span class="pl-k">unsafe</span> <span class="pl-k">fn</span> <span class="pl-en">try_push_report</span>(<span class="pl-smi">keyboard_report</span><span class="pl-k">:</span> <span class="pl-k">&#x26;</span><span class="pl-en">usbd_hid</span><span class="pl-k">::</span><span class="pl-en">descriptor</span><span class="pl-k">::</span><span class="pl-en">KeyboardReport</span>) <span class="pl-k">-></span> <span class="pl-en">bool</span> {
+<span class="pl-c">    // This core won't be interrupted while handling the mutable reference.</span>
+<span class="pl-c">    // A regular lock without a critical section here would cause a deadlock in the below interrupt handling procedure </span>
+<span class="pl-c">    // if timing is unfortunate.</span>
+    <span class="pl-en">critical_section</span><span class="pl-k">::</span><span class="pl-en">with</span>(<span class="pl-k">|</span><span class="pl-smi">_cs</span><span class="pl-k">|</span> {
+        <span class="pl-c1">USB_HIDDEV</span>
+            <span class="pl-k">.</span><span class="pl-en">as_mut</span>()
+            <span class="pl-k">.</span><span class="pl-en">is_some_and</span>(<span class="pl-k">|</span><span class="pl-smi">hid</span><span class="pl-k">|</span> <span class="pl-smi">hid</span><span class="pl-k">.</span><span class="pl-en">try_submit_report</span>(<span class="pl-smi">keyboard_report</span>))
+    })
+}
+#[cfg(feature <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>hiddev<span class="pl-pds">"</span></span>)]
+<span class="pl-k">pub</span> <span class="pl-k">unsafe</span> <span class="pl-k">fn</span> <span class="pl-en">hiddev_interrupt_poll</span>() {
+<span class="pl-c">    // This core won't be interrupted, because there's only one interrupt registered, so there's nothing to interrupt this.</span>
+<span class="pl-c">    // Since it's already interrupted the core that handles the other mutable reference to this variable </span>
+<span class="pl-c">    // we can be certain that this is the only mutable reference active without a critical section or other lock.</span>
+    <span class="pl-k">if</span> <span class="pl-k">let</span> <span class="pl-en">Some</span>(<span class="pl-smi">hid</span>) <span class="pl-k">=</span> <span class="pl-c1">USB_HIDDEV</span><span class="pl-k">.</span><span class="pl-en">as_mut</span>() {
+        <span class="pl-smi">hid</span><span class="pl-k">.</span><span class="pl-en">poll</span>();
+    }
+}
+</pre></div>
+<h3>USB HID protocol</h3>
+<p>Back to the protocol, the API has two ends, one for polling the OS, one for submitting HID-reports.<br>
+It turns out that even if you don't expect any data from the OS the device needs to be polled to communicate.</p>
+<p>In my first shot I just pushed keyboard reports on every diff and polling immediately after. This caused
+key-actions to disappear, they didn't reach the OS.</p>
+<p>I still haven't quite figured out why since I'm not overflowing the buffer, digging into the code didn't help me
+understand much either, but it was pretty opaque.</p>
+<p>I settled for pushing at most one keyboard report per poll, that means at most one per ms.
+This means a worst case latency of 1ms on a key-action assuming there's no queue-backup, I keep eventual unpublishable
+reports in a queue that's drained 1 entry per poll. Again, there may be something written in the specifications
+about this, but it's good enough for now.</p>
+<h4>Follow-up</h4>
+<p>I did try to find more information about the USB HID protocol but was unable to.
+I also tried to figure out how to do <a href="https://en.wikipedia.org/wiki/Key_rollover">keyrollover, specifically NKRO</a>
+but could not figure out how to have more registered keys than the <code>keyboard_report</code>-struct
+can fit (6), so the keyboard is <code>6KRO</code>, which Is fine by me.</p>
+<h2>Oled displays</h2>
+<p>One of the motivators for using multiple cores were the ability to render to oled on-demand with low latency.</p>
+<p>Drawing to an oled display is comparatively slow, so offloading that to a separate core was something that I was interested
+in doing.</p>
+<p>I created a shared message queue guarded by a spin-lock:</p>
+<div class="highlight highlight-rust"><pre>#[derive(<span class="pl-en">Debug</span>, <span class="pl-en">Copy</span>, <span class="pl-en">Clone</span>)]
+<span class="pl-k">pub</span> <span class="pl-k">enum</span> <span class="pl-en">KeycoreToAdminMessage</span> {
+<span class="pl-c">    // Notify on any user action</span>
+    <span class="pl-en">Touch</span>,
+<span class="pl-c">    // Send loop count to calculate scan latency</span>
+    <span class="pl-en">Loop</span>(<span class="pl-en">LoopCount</span>),
+<span class="pl-c">    // Output which layer is active</span>
+    <span class="pl-en">LayerChange</span>(<span class="pl-en">KeymapLayer</span>),
+<span class="pl-c">    // Output bytes received over UART</span>
+    <span class="pl-en">Rx</span>(<span class="pl-en">u16</span>),
+<span class="pl-c">    // Write a boot message then trigger usb-boot</span>
+    <span class="pl-en">Reboot</span>,
+}
+</pre></div>
+<p>When displayed it looks like this:</p>
+<p><img src="/static/rust-kbd-oled.jpg" alt="oleds"></p>
+<p>Setting it up was pretty trivial, there's a library for <a href="https://docs.rs/ssd1306/latest/ssd1306/">SSD1306 oleds</a>
+which works great!</p>
+<p>Now I have a keyboard that can submit key-presses to the OS, and display some debug information on its oleds,
+time to get into the bugs.</p>
+<h2>BUUUUUUUGS</h2>
+<p>Almost immediately when trying to type I discovered that keys would be repeated, pressing t would result in
+19 t's for example.</p>
+<h3>Spooky electrons, debounce!</h3>
+<p>I looked into QMK once more, since my keyboard with QMK firmware doesn't have issues (IE not a hardware problem).<br>
+All excepts of C below are from <a href="https://github.com/qmk/qmk_firmware">QMK</a>, <a href="https://github.com/qmk/qmk_firmware/blob/master/license_GPLv3.md">license here</a>.</p>
+<p>Here's the function that reads pins:</p>
+<div class="highlight highlight-c"><pre><span class="pl-c">/// quantum/matrix.c</span>
+<span class="pl-en">__attribute__</span>((weak)) void matrix_read_rows_on_col(<span class="pl-c1">matrix_row_t</span> current_matrix[], <span class="pl-c1">uint8_t</span> current_col, <span class="pl-c1">matrix_row_t</span> row_shifter) {
+    <span class="pl-k">bool</span> key_pressed = <span class="pl-c1">false</span>;
+    <span class="pl-c">// Select col</span>
+    <span class="pl-k">if</span> (!<span class="pl-c1">select_col</span>(current_col)) { <span class="pl-c">// select col</span>
+        <span class="pl-k">return</span>;                     <span class="pl-c">// skip NO_PIN col</span>
+    }
+    <span class="pl-c1">matrix_output_select_delay</span>();
+    <span class="pl-c">// For each row...</span>
+    <span class="pl-k">for</span> (<span class="pl-c1">uint8_t</span> row_index = <span class="pl-c1">0</span>; row_index &#x3C; ROWS_PER_HAND; row_index++) {
+        <span class="pl-c">// Check row pin state</span>
+        <span class="pl-k">if</span> (<span class="pl-c1">readMatrixPin</span>(row_pins[row_index]) == <span class="pl-c1">0</span>) {
+            <span class="pl-c">// Pin LO, set col bit</span>
+            current_matrix[row_index] |= row_shifter;
+            key_pressed = <span class="pl-c1">true</span>;
+        } <span class="pl-k">else</span> {
+            <span class="pl-c">// Pin HI, clear col bit</span>
+            current_matrix[row_index] &#x26;= ~row_shifter;
+        }
+    }
+    <span class="pl-c">// Unselect col</span>
+    <span class="pl-c1">unselect_col</span>(current_col);
+    <span class="pl-c1">matrix_output_unselect_delay</span>(current_col, key_pressed); <span class="pl-c">// wait for all Row signals to go HIGH</span>
+}
+</pre></div>
+<p>I had looked at it previously, but disregarded those delays (<code>matrix_output_select_delay()</code> and
+<code>matrix_output_unselect_delay(current_col, key_pressed); // wait for all Row signals to go HIGH</code>), because
+we're trying to be speedy here. <code>Thread.sleep()</code> isn't speedy, everyone knows that.</p>
+<p>However, it turns out that they are important. Again I have to follow weak functions, a nightmare:</p>
+<div class="highlight highlight-c"><pre><span class="pl-c">/// quantum/matrix_common.c</span>
+<span class="pl-en">__attribute__</span>((weak)) void matrix_output_select_delay(<span class="pl-k">void</span>) {
+    <span class="pl-c1">waitInputPinDelay</span>();
+}
+<span class="pl-c">// Found implementation in -> </span>
+<span class="pl-c">/// platform/chibios/_wait.h</span>
+#<span class="pl-k">ifndef</span> GPIO_INPUT_PIN_DELAY
+#    <span class="pl-k">define</span> <span class="pl-en">GPIO_INPUT_PIN_DELAY</span> (CPU_CLOCK / <span class="pl-c1">1000000L</span> / <span class="pl-c1">4</span>)
+#<span class="pl-k">endif</span>
+#<span class="pl-k">define</span> <span class="pl-en">waitInputPinDelay</span>() wait_cpuclock(GPIO_INPUT_PIN_DELAY)
+</pre></div>
+<p>I get no editor support in this project, so I have to grep through countless board implementations until I found
+the correct one, which isn't exactly easy to tell. But, after setting the <code>col</code>-pin to <code>low</code>, there's a <code>250ns</code> wait.</p>
+<p>I implement it, and it changes nothing. On to the next!</p>
+<div class="highlight highlight-c"><pre><span class="pl-c">/// quantum/matrix_common.c</span>
+<span class="pl-en">__attribute__</span>((weak)) void matrix_output_unselect_delay(<span class="pl-c1">uint8_t</span> line, <span class="pl-k">bool</span> key_pressed) {
+    <span class="pl-c1">matrix_io_delay</span>();
+}
+<span class="pl-c">/// quantum/matrix_common.c</span>
+<span class="pl-c">/* `matrix_io_delay ()` exists for backwards compatibility. From now on, use matrix_output_unselect_delay(). */</span>
+<span class="pl-en">__attribute__</span>((weak)) void matrix_io_delay(<span class="pl-k">void</span>) {
+    <span class="pl-c1">wait_us</span>(MATRIX_IO_DELAY);
+}
+<span class="pl-c">// quantum/matrix_common.c</span>
+#<span class="pl-k">ifndef</span> MATRIX_IO_DELAY
+#    <span class="pl-k">define</span> <span class="pl-en">MATRIX_IO_DELAY</span> <span class="pl-c1">30</span>
+#<span class="pl-k">endif</span>
+</pre></div>
+<p>for all of the above symbols, I need to check that it's not specifically overridden by my keyboard implementation,
+none were. <code>matrix_output_unselect_delay(current_col, key_pressed)</code> therefore waits <code>30μs</code>.</p>
+<p>I add the delay and the number of t's go from 19 to sometimes <em>many</em>, good not great. But, my scan-rate which is directly influencing
+latency on presses goes from around <code>40μs</code> to <code>200μs+</code> (6 columns, each with a <code>30μs</code> sleep), unacceptable. The above code did come with a comment,
+it wants the row-pins to settle back into <code>high</code>, so I could just check for that instead!</p>
+<div class="highlight highlight-rust"><pre><span class="pl-c">// Wait for all rows to settle</span>
+<span class="pl-k">for</span> <span class="pl-smi">row</span> <span class="pl-k">in</span> <span class="pl-smi">rows</span> {
+    <span class="pl-k">while</span> <span class="pl-en">matches!</span>(<span class="pl-smi">row</span><span class="pl-k">.</span><span class="pl-c1">0.</span><span class="pl-en">is_low</span>(), <span class="pl-en">Ok</span>(<span class="pl-c1">true</span>)) {}
+}
+</pre></div>
+<p>Now latency lands around <code>50μs</code>. I still have that issue of the many t's, but at least the problem didn't get worse.</p>
+<p>I hook up the keyboard to <code>picocom</code> and start reading output lines.<br>
+I output each state-delta as <code>M0, R0, C0 -> true [90237]</code>, matrix index, row_index, column index, and whether the key
+is pressed or not, followed by the number of microseconds since the last state-change.</p>
+<p>I can see that the activation-behavior is strange, sometimes, immediately (generally around <code>250μs</code> after a
+legitimate key-action) state-flips unexpectedly and holds in the ghost-state for <code>100-2500μs</code>.
+It's not a rogue flip, the state is actually changed as if the switch is pressed (or released) for quite some time.</p>
+<p>However much I tried, I could not get these ghosts out of my keyboard, I had to learn to live with them.</p>
+<h4>Debouncing</h4>
+<p>Debouncing is a way to regulate signals (I think, this really isn't my field, don't roast me on the definitions), and
+is a broad concept which can be applied to noisy signals in all kinds of areas.</p>
+<p>I wanted to implement debouncing in a way that affected latency minimally, luckily this behaviour is only triggered
+after legitimate key-actions, and on a per-key basis. IE. I only have to regulate keys after the first signal which I
+know is good, and only for the same key that produced the good signal.</p>
+<p>I record the last key-action and set up quarantine logic, it goes like this:</p>
+<blockquote>
+<p>If a key has a delta shortly (implemented with a constant, 10_000 micros at writing) after the previous delta,
+require that the new state is repeated for a short (same as above) time before producing a signal.</p>
+</blockquote>
+<p>My fastest repeated key-pressing of a single key is around <code>40_000μs</code> between presses, so this should not activate
+on good presses. Furthermore, if it does and that state is held for long enough the key comes through anyway.</p>
+<p>This worked like a charm, on a given keypress it should not increase latency at all, but it killed the noise.</p>
+<h3>Mysterious halting</h3>
+<p>At some point of developing the keymap, the keyboard would start freezing on boot, not producing any output.
+I couldn't understand why, but <code>core1</code>, which handles key-presses wouldn't report anything. Once more I had to
+get the dedicated boot-skewer out to flash new firmware.</p>
+<p>I started removing the latest changes and realized that scanning 5 columns for changes but not 6 on the left side
+would work fine. Adding back scanning 6 columns would freeze immediately again.</p>
+<p>I took a break and when doing something else it suddenly struck me, here!</p>
+<div class="highlight highlight-rust"><pre>#[allow(static_mut_refs)]
+<span class="pl-k">if</span> <span class="pl-k">let</span> <span class="pl-en">Err</span>(<span class="pl-smi">_e</span>) <span class="pl-k">=</span> <span class="pl-smi">mc</span><span class="pl-k">.</span><span class="pl-en">cores</span>()[<span class="pl-c1">1</span>]<span class="pl-k">.</span><span class="pl-en">spawn</span>(<span class="pl-k">unsafe</span> { <span class="pl-k">&#x26;mut</span> <span class="pl-c1">CORE_1_STACK_AREA</span> }, <span class="pl-k">move</span> <span class="pl-k">||</span> {
+    <span class="pl-en">run_core1</span>(
+        <span class="pl-smi">receiver</span>,
+        <span class="pl-smi">left_buttons</span>,
+        <span class="pl-smi">timer</span>,
+        #[<span class="pl-en">cfg</span>(<span class="pl-smi">feature</span> <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>hiddev<span class="pl-pds">"</span></span>)]
+        <span class="pl-smi">usb_bus</span>,
+    )
+})
+</pre></div>
+<p>Can you see it?</p>
+<p>Well?</p>
+<p>The unsafe draws the attention, but I'm manually setting the stack area for core1:</p>
+<p><code>static mut CORE_1_STACK_AREA: [usize; 1024] = [0; 1024];</code></p>
+<p>When adding the code for a 6th row, the stack overflows and the core halts, increasing the stack area
+immediately solved the issue.</p>
+<h2>Performance</h2>
+<p>Now the keyboard is actually usable, time for the fun part, performance. This is my first real embedded project,
+and I learned a lot programming for a different target.</p>
+<h3>Real time</h3>
+<p>First off, since there's not much of a scheduler running (disregarding interrupts) the displayed scan rate on the
+oleds gives very direct feedback on changes in performance, usually it's much more difficult to see how code-changes
+impact performance, but here it's immediate and easy to spot.</p>
+<h3>Priorities</h3>
+<p>Measurement is the key to performance, and the measurements of interests are, in order, scan rate, key-processing-rate,
+and binary size. Scan rate is important, because that determines the latency of key-press -> OS,
+secondly, key-processing can't be too slow since that immediately tacks on to the latency, lastly there's a size restriction
+of 2MB on the produced image.</p>
+<h3>Methodology</h3>
+<p>The oled displays scan rate, so that's easy. Key-processing-rate can't be measured as easily. However, jamming
+the keyboard at max speed and checking the scan rate was used as a proxy. Binary size can be inspected on compilation.</p>
+<h2>Inlining</h2>
+<p>When people talk about performance <a href="https://en.wikipedia.org/wiki/Inline_expansion">inlining</a> often comes up.</p>
+<p>Briefly, inlining is replacing a function call with the code from that function at the call-site, here's an example.</p>
+<div class="highlight highlight-rust"><pre>
+<span class="pl-k">fn</span> <span class="pl-en">my_add</span>(<span class="pl-smi">a</span><span class="pl-k">:</span> <span class="pl-en">i32</span>, <span class="pl-smi">b</span><span class="pl-k">:</span> <span class="pl-en">i32</span>) <span class="pl-k">-></span> <span class="pl-en">i32</span> {
+    <span class="pl-smi">a</span> <span class="pl-k">+</span> <span class="pl-smi">b</span>
+}
+<span class="pl-k">fn</span> <span class="pl-en">not_inlined_caller</span>() {
+<span class="pl-c">    // Not inlined the function is called, moving 1, and 2 into the correct ABI-defined registers</span>
+<span class="pl-c">    // then invoking the function.</span>
+    <span class="pl-en">my_add</span>(<span class="pl-c1">1</span>, <span class="pl-c1">2</span>); 
+}
+<span class="pl-k">fn</span> <span class="pl-en">inlined_caller_after_inlining</span>() {
+<span class="pl-c">    // my_add(1, 2) &#x3C;- disappears</span>
+    <span class="pl-c1">1</span> <span class="pl-k">+</span> <span class="pl-c1">2</span><span class="pl-c"> // &#x3C;- `my_add` function body copied into this function</span>
+}
+</pre></div>
+<p>Inlining reduces some overhead, such as shuffling around values to registers, and invoking functions,
+but all that copying of code can produce a lot of instructions, which may thrash the CPU's instruction cache.</p>
+<p>Here's an example of how that could become problematic:</p>
+<div class="highlight highlight-rust"><pre>#[inline]
+<span class="pl-k">fn</span> <span class="pl-en">my_very_long_fn</span>() {
+<span class="pl-c">    // 1000 lines of spooky code</span>
+}
+<span class="pl-k">fn</span> <span class="pl-en">my_caller</span>(<span class="pl-smi">rarely_true</span><span class="pl-k">:</span> <span class="pl-en">bool</span>) {
+    <span class="pl-k">if</span> <span class="pl-smi">rarely_true</span> {
+        <span class="pl-en">my_very_long_fn</span>();
+    }
+}
+</pre></div>
+<p>Depending on the CPU, it might, on entering <code>my_caller</code>, have to fetch all the instructions contained in <code>my_very_long_fn</code>
+draining space in the instruction cache resulting in re-fetches which may take a long time.
+If <code>rarely_true</code> is rarely true this could be an unnecessary overhead, and if the function is long enough, the
+eventual savings from inlining may pale in comparison to the execution-time of the inlined function meaning that
+there's no upside in the <code>rarely_true == true</code>-case, and huge downside in the <code>rarely_true == false</code>-case.</p>
+<p>It's hard to draw general conclusions however, you have to measure to be sure, luckily I measured!</p>
+<h3>Inlining in practice</h3>
+<p>There weren't huge surprises on where inlining made the most difference, but I was surprised with how much it mattered.</p>
+<p>The general logic of <code>core1</code> is this:</p>
+<ol>
+<li>Check for changes (uart, gpio, usb).
+<li>On a change, execute some logic (left side sends a keypress to the OS, right side sends it to the left).
+<li>Report changes to <code>core0</code>.
+</ol>
+<p>The vast majority of the time each loop produces no change, here's an excerpt from left side <code>core1</code>:</p>
+<div class="highlight highlight-rust"><pre><span class="pl-k">loop</span> {
+    <span class="pl-k">let</span> <span class="pl-k">mut</span> <span class="pl-smi">any_change</span> <span class="pl-k">=</span> <span class="pl-c1">false</span>;
+    <span class="pl-k">if</span> <span class="pl-k">let</span> <span class="pl-en">Some</span>(<span class="pl-smi">update</span>) <span class="pl-k">=</span> <span class="pl-smi">receiver</span><span class="pl-k">.</span><span class="pl-en">try_read</span>() {
+<span class="pl-c">        // Right side sent an update</span>
+        <span class="pl-smi">rx</span> <span class="pl-k">+=</span> <span class="pl-c1">1</span>;
+<span class="pl-c">        // Update report state</span>
+        <span class="pl-smi">kbd</span><span class="pl-k">.</span><span class="pl-en">update_right</span>(<span class="pl-smi">update</span>, <span class="pl-k">&#x26;mut</span> <span class="pl-smi">report_state</span>);
+        <span class="pl-smi">any_change</span> <span class="pl-k">=</span> <span class="pl-c1">true</span>;
+    }
+<span class="pl-c">    // Check left side gpio and update report state</span>
+    <span class="pl-k">if</span> <span class="pl-smi">kbd</span><span class="pl-k">.</span><span class="pl-en">scan_left</span>(<span class="pl-k">&#x26;mut</span> <span class="pl-smi">left_buttons</span>, <span class="pl-k">&#x26;mut</span> <span class="pl-smi">report_state</span>, <span class="pl-smi">timer</span>) {
+        <span class="pl-smi">any_change</span> <span class="pl-k">=</span> <span class="pl-c1">true</span>;
+    }
+    <span class="pl-k">if</span> <span class="pl-smi">any_change</span> {
+        <span class="pl-en">push_touch_to_admin</span>();
+    }
+    #[cfg(feature <span class="pl-k">=</span> <span class="pl-s"><span class="pl-pds">"</span>hiddev<span class="pl-pds">"</span></span>)]
+    {
+        <span class="pl-k">let</span> <span class="pl-k">mut</span> <span class="pl-smi">pop</span> <span class="pl-k">=</span> <span class="pl-c1">false</span>;
+        <span class="pl-k">if</span> <span class="pl-k">let</span> <span class="pl-en">Some</span>(<span class="pl-smi">next_update</span>) <span class="pl-k">=</span> <span class="pl-smi">report_state</span><span class="pl-k">.</span><span class="pl-en">report</span>() {
+<span class="pl-c">            // Publish the next update on queue if present</span>
+            <span class="pl-k">unsafe</span> {
+                <span class="pl-smi">pop</span> <span class="pl-k">=</span> <span class="pl-k">crate::</span><span class="pl-en">runtime</span><span class="pl-k">::</span><span class="pl-en">shared</span><span class="pl-k">::</span><span class="pl-en">usb</span><span class="pl-k">::</span><span class="pl-en">try_push_report</span>(<span class="pl-smi">next_update</span>);
+            }
+        }
+        <span class="pl-k">if</span> <span class="pl-smi">pop</span> {
+<span class="pl-c">            // Remove the sent report (it's down here because of the borrow checker)</span>
+            <span class="pl-smi">report_state</span><span class="pl-k">.</span><span class="pl-en">accept</span>();
+        }
+    }
+    <span class="pl-k">if</span> <span class="pl-k">let</span> <span class="pl-en">Some</span>(<span class="pl-smi">change</span>) <span class="pl-k">=</span> <span class="pl-smi">report_state</span><span class="pl-k">.</span><span class="pl-en">layer_update</span>() {
+        <span class="pl-en">push_layer_change</span>(<span class="pl-smi">change</span>);
+    }
+    <span class="pl-k">if</span> <span class="pl-smi">rx</span> <span class="pl-k">></span> <span class="pl-c1">0</span> <span class="pl-k">&#x26;&#x26;</span> <span class="pl-en">push_rx_change</span>(<span class="pl-smi">rx</span>) {
+        <span class="pl-smi">rx</span> <span class="pl-k">=</span> <span class="pl-c1">0</span>;
+    }
+    <span class="pl-k">if</span> <span class="pl-smi">loop_count</span><span class="pl-k">.</span><span class="pl-en">increment</span>() {
+        <span class="pl-k">let</span> <span class="pl-smi">now</span> <span class="pl-k">=</span> <span class="pl-smi">timer</span><span class="pl-k">.</span><span class="pl-en">get_counter</span>();
+        <span class="pl-k">let</span> <span class="pl-smi">lc</span> <span class="pl-k">=</span> <span class="pl-smi">loop_count</span><span class="pl-k">.</span><span class="pl-en">value</span>(<span class="pl-smi">now</span>);
+        <span class="pl-k">if</span> <span class="pl-en">push_loop_to_admin</span>(<span class="pl-smi">lc</span>) {
+            <span class="pl-smi">loop_count</span><span class="pl-k">.</span><span class="pl-en">reset</span>(<span class="pl-smi">now</span>);
+        }
+    }
+}
+</pre></div>
+<p>Some of the code in that loop is only triggered in certain cases, I followed the philosophy of inlining most of what
+always runs, and refusing to inline things that are conditionally called, Rust has facilities for this:</p>
+<p><code>#[inline]</code>, <code>#[inline(never)]</code>, and <code>#[inline(always)]</code>, the compiler is usually smart enough that it makes
+the correct call if <code>#[inline]</code> is specified or not, so <code>#[inline(never)]</code>, and <code>#[inline(always)]</code> aren't that necessary.</p>
+<p><a href="https://nnethercote.github.io/perf-book/inlining.html">More information here</a> on cross-crate stuff, but I'm compiling
+with <a href="https://doc.rust-lang.org/rustc/codegen-options/index.html">fat-lto</a> anyway, so it doesn't really matter to me here.</p>
+<p>The most impressive change was removing <code>#[inline]</code> from <code>kbd.update_right(update, &#x26;mut report_state);</code> inside the
+if-statement above, that took the current scan latency from <code>80μs</code> to around <code>36μs</code>. Not inlining it halved the
+scan latency.</p>
+<p>Last notes on inlining, the compiler makes decisions about inlining that can be very hard to understand, you change
+something seemingly irrelevant, and suddenly the binary increases in size by 25% and latency increases by about
+the same amount because the compiler decided to inline something that doesn't fit with your performance goals.
+I want the scan-loop to be fast, but the compiler saw an opportunity to make something else fast at the expense of
+the scan-loop, for example. It's not a <em>bad</em> decision, but it's a bad fit.<br>
+Making small changes and testing them is therefore important, and interesting!</p>
+<h2>Const evaluation, bounds checking</h2>
+<p>Fewer instructions are often better, fewer instructions are generally faster to execute than more instructions,
+they take up less space in the instruction-cache, and may therefore make an inlining-tradeoff make more sense.</p>
+<p>This <code>get_unchecked</code> which elides the bounds-check made a massive difference in performance.</p>
+<div class="highlight highlight-rust"><pre><span class="pl-c">/// self.buffer[self.tail] -> unsafe {self.buffer.get_unchecked_mut(self.tail)};</span>
+</pre></div>
+<p>It did it in two parts, it caused the compiler to inline the function, that in itself did a lot.
+I manually marked it inline and reverted the change, and it still provided a several microsecond benefit.
+Since I do bounds-checking elsewhere, I was confident keeping this <code>unsafe</code>.</p>
+<p>To further improve performance I wanted to evaluate as much as possible at compilation time, so that things are
+accessed efficiently, if I can assert that indices are in bounds at comptime, I can safely use unsafe
+index accesses. Rust's type system provides tools for that, and since I know how many keys I have on my keyboard,
+I don't have to have any dynamically sized arrays.</p>
+<p>Here's an example:</p>
+<div class="highlight highlight-rust"><pre>#[repr(transparent)]
+#[derive(<span class="pl-en">Debug</span>, <span class="pl-en">Copy</span>, <span class="pl-en">Clone</span>)]
+<span class="pl-k">pub</span> <span class="pl-k">struct</span> <span class="pl-en">RowIndex</span>(<span class="pl-k">pub</span> <span class="pl-en">u8</span>);
+<span class="pl-k">impl</span> <span class="pl-en">RowIndex</span> {
+    #[must_use]
+    #[allow(clippy<span class="pl-k">::</span>missing_panics_doc)]
+    <span class="pl-k">pub</span> <span class="pl-k">const</span> <span class="pl-k">fn</span> <span class="pl-en">from_value</span>(<span class="pl-smi">ind</span><span class="pl-k">:</span> <span class="pl-en">u8</span>) <span class="pl-k">-></span> <span class="pl-c1">Self</span> {
+        <span class="pl-en">assert!</span>(
+            <span class="pl-smi">ind</span> <span class="pl-k">&#x3C;</span> <span class="pl-c1">NUM_ROWS</span>,
+            <span class="pl-s"><span class="pl-pds">"</span>Tried to construct row index from a bad value<span class="pl-pds">"</span></span>
+        );
+        <span class="pl-c1">Self</span>(<span class="pl-smi">ind</span>)
+    }
+    #[inline]
+    #[must_use]
+    <span class="pl-k">pub</span> <span class="pl-k">const</span> <span class="pl-k">fn</span> <span class="pl-en">index</span>(<span class="pl-c1">self</span>) <span class="pl-k">-></span> <span class="pl-en">usize</span> {
+        <span class="pl-c1">self</span><span class="pl-k">.</span><span class="pl-c1">0</span> <span class="pl-k">as</span> <span class="pl-en">usize</span>
+    }
+}
+</pre></div>
+<p>The <code>RowIndex</code>-struct only accepts indices that are valid, therefore it's always safe to use to index into
+structures with <code>NUM_ROWS</code> length or more.</p>
+<p>Using this strategy to elide bounds-checking shaved more microseconds off the loop-times. Since pin-indexing
+is done on the <code>gpio</code> pin-scan on each loop, these improvements makes quite the difference.</p>
+<h2>Macros to avoid branching</h2>
+<p>I abhor macros, they're difficult to follow and understand, and professionally I try to avoid them like the plague.
+But, here in my private life it's all about the performance, and they can be useful to avoid branching.</p>
+<p>Consider the connection of the actual GPIO-pin, and the struct that I use to keep a pin's state in memory.</p>
+<p>They have different types, all the GPIO-pins have different types, and all the keys as well, they can't be
+kept in a collection together without using a <a href="https://doc.rust-lang.org/std/keyword.dyn.html">v-table</a>. This, in my opinion, is fixable in <code>Rust</code>.
+The reason that the buttons, for example, can't be kept together, is that each button may have a different memory layout.</p>
+<p>In my case they all have the same layout and all expose the same function, here's an example:</p>
+<div class="highlight highlight-rust"><pre><span class="pl-k">impl</span> <span class="pl-en">KeyboardButton</span> <span class="pl-k">for</span> <span class="pl-en">LeftRow0Col0</span> {
+    <span class="pl-k">fn</span> <span class="pl-en">on_press</span>(<span class="pl-k">&#x26;mut</span> <span class="pl-c1">self</span>, <span class="pl-smi">keyboard_report_state</span><span class="pl-k">:</span> <span class="pl-k">&#x26;mut</span> <span class="pl-en">KeyboardReportState</span>) {
+        <span class="pl-smi">keyboard_report_state</span><span class="pl-k">.</span><span class="pl-en">push_key</span>(<span class="pl-en">KeyCode</span><span class="pl-k">::</span><span class="pl-c1">TAB</span>);
+    }
+    <span class="pl-k">fn</span> <span class="pl-en">on_release</span>(
+        <span class="pl-k">&#x26;mut</span> <span class="pl-c1">self</span>,
+        <span class="pl-smi">_last_press_state</span><span class="pl-k">:</span> <span class="pl-en">LastPressState</span>,
+        <span class="pl-smi">keyboard_report_state</span><span class="pl-k">:</span> <span class="pl-k">&#x26;mut</span> <span class="pl-en">KeyboardReportState</span>,
+    ) {
+        <span class="pl-smi">keyboard_report_state</span><span class="pl-k">.</span><span class="pl-en">pop_key</span>(<span class="pl-en">KeyCode</span><span class="pl-k">::</span><span class="pl-c1">TAB</span>);
+    }
+}
+</pre></div>
+<p>I generate the key-structs from a macro, they all have the exact same layout.
+I should be able to store them in an array (assuming that the function addresses of each respective button's methods are knowable
+which thinking about it, they might not be).</p>
+<p>Macros are a way around this though:</p>
+<div class="highlight highlight-rust"><pre><span class="pl-en">macro_rules!</span> <span class="pl-en">impl_read_pin_col</span> {
+    (<span class="pl-k">$</span>(<span class="pl-k">$</span><span class="pl-smi">structure</span><span class="pl-k">:</span> <span class="pl-smi">expr</span>, <span class="pl-k">$</span><span class="pl-smi">row</span><span class="pl-k">:</span> <span class="pl-smi">tt</span>,)<span class="pl-k">*</span>, <span class="pl-k">$</span><span class="pl-smi">col</span><span class="pl-k">:</span> <span class="pl-smi">tt</span>) <span class="pl-k">=></span> {
+        <span class="pl-en">paste!</span> {
+            <span class="pl-k">pub</span> <span class="pl-k">fn</span> [&#x3C;<span class="pl-smi">read_col</span> <span class="pl-smi">_</span> <span class="pl-k">$</span><span class="pl-smi">col</span> <span class="pl-smi">_pins</span>>](<span class="pl-k">$</span>([&#x3C; <span class="pl-k">$</span><span class="pl-smi">structure</span><span class="pl-k">:</span><span class="pl-smi">snake</span> >]<span class="pl-k">:</span> <span class="pl-k">&#x26;mut</span> <span class="pl-k">$</span><span class="pl-smi">structure</span>,)<span class="pl-k">*</span> <span class="pl-smi">left_buttons</span><span class="pl-k">:</span> <span class="pl-k">&#x26;mut</span> <span class="pl-en">LeftButtons</span>, <span class="pl-smi">keyboard_report_state</span><span class="pl-k">:</span> <span class="pl-k">&#x26;mut</span> <span class="pl-en">KeyboardReportState</span>, <span class="pl-smi">timer</span><span class="pl-k">:</span> <span class="pl-en">Timer</span>) <span class="pl-k">-></span> <span class="pl-en">bool</span> {
+<span class="pl-c">                // Safety: Make sure this is properly initialized and restored</span>
+<span class="pl-c">                // at the end of this function, makes a noticeable difference in performance</span>
+                <span class="pl-k">let</span> <span class="pl-smi">col</span> <span class="pl-k">=</span> <span class="pl-k">unsafe</span> {<span class="pl-smi">left_buttons</span><span class="pl-k">.</span>cols<span class="pl-k">.$</span><span class="pl-smi">col</span><span class="pl-k">.</span><span class="pl-en">take</span>()<span class="pl-k">.</span><span class="pl-en">unwrap_unchecked</span>()};
+                <span class="pl-k">let</span> <span class="pl-smi">col</span> <span class="pl-k">=</span> <span class="pl-smi">col</span><span class="pl-k">.</span><span class="pl-en">into_push_pull_output_in_state</span>(<span class="pl-en">PinState</span><span class="pl-k">::</span><span class="pl-en">Low</span>);
+<span class="pl-c">                // Just pulling chibios defaults of 0.25 micros, could probably be 0</span>
+                <span class="pl-k">crate::</span><span class="pl-en">timer</span><span class="pl-k">::</span><span class="pl-en">wait_nanos</span>(<span class="pl-smi">timer</span>, <span class="pl-c1">250</span>);
+                <span class="pl-k">let</span> <span class="pl-k">mut</span> <span class="pl-smi">any_change</span> <span class="pl-k">=</span> <span class="pl-c1">false</span>;
+                <span class="pl-k">$</span>(
+                    {
+                        <span class="pl-k">if</span> [&#x3C; <span class="pl-k">$</span><span class="pl-smi">structure</span><span class="pl-k">:</span><span class="pl-smi">snake</span> >]<span class="pl-k">.</span><span class="pl-en">check_update_state</span>(<span class="pl-smi">left_buttons</span><span class="pl-k">.</span><span class="pl-en">row_pin_is_low</span>(<span class="pl-en">rp2040_kbd_lib</span><span class="pl-k">::</span><span class="pl-en">matrix</span><span class="pl-k">::</span><span class="pl-en">RowIndex</span><span class="pl-k">::</span><span class="pl-en">from_value</span>(<span class="pl-k">$</span><span class="pl-smi">row</span>)), <span class="pl-smi">keyboard_report_state</span>, <span class="pl-smi">timer</span>) {
+                            <span class="pl-smi">any_change</span> <span class="pl-k">=</span> <span class="pl-c1">true</span>;
+                        }
+                    }
+                )<span class="pl-k">*</span>
+                <span class="pl-smi">left_buttons</span><span class="pl-k">.</span>cols<span class="pl-k">.$</span><span class="pl-smi">col</span> <span class="pl-k">=</span> <span class="pl-en">Some</span>(<span class="pl-smi">col</span><span class="pl-k">.</span><span class="pl-en">into_pull_up_input</span>());
+                <span class="pl-k">$</span>(
+                    {
+                        <span class="pl-k">while</span> <span class="pl-smi">left_buttons</span><span class="pl-k">.</span><span class="pl-en">row_pin_is_low</span>(<span class="pl-en">rp2040_kbd_lib</span><span class="pl-k">::</span><span class="pl-en">matrix</span><span class="pl-k">::</span><span class="pl-en">RowIndex</span><span class="pl-k">::</span><span class="pl-en">from_value</span>(<span class="pl-k">$</span><span class="pl-smi">row</span>)) {}
+                    }
+                )<span class="pl-k">*</span>
+                <span class="pl-smi">any_change</span>
+            }
+        }
+    };
+}
+</pre></div>
+<p>Here's how it's used:</p>
+<div class="highlight highlight-rust"><pre><span class="pl-en">impl_read_pin_col!</span>(
+    <span class="pl-en">LeftRow0Col1</span>, <span class="pl-c1">0</span>,
+    <span class="pl-en">LeftRow1Col1</span>, <span class="pl-c1">1</span>,
+    <span class="pl-en">LeftRow2Col1</span>, <span class="pl-c1">2</span>,
+    <span class="pl-en">LeftRow3Col1</span>, <span class="pl-c1">3</span>,
+    <span class="pl-en">LeftRow4Col1</span>, <span class="pl-c1">4</span>,
+    ,<span class="pl-c1">1</span>
+); 
+<span class="pl-c">// Produces function `read_col_1_pins` with proper typechecking</span>
+<span class="pl-k">let</span> <span class="pl-smi">col1_change</span> <span class="pl-k">=</span> <span class="pl-en">read_col_1_pins</span>(
+    <span class="pl-k">&#x26;mut</span> <span class="pl-c1">self</span><span class="pl-k">.</span>left_row0_col1,
+    <span class="pl-k">&#x26;mut</span> <span class="pl-c1">self</span><span class="pl-k">.</span>left_row1_col1,
+    <span class="pl-k">&#x26;mut</span> <span class="pl-c1">self</span><span class="pl-k">.</span>left_row2_col1,
+    <span class="pl-k">&#x26;mut</span> <span class="pl-c1">self</span><span class="pl-k">.</span>left_row3_col1,
+    <span class="pl-k">&#x26;mut</span> <span class="pl-c1">self</span><span class="pl-k">.</span>left_row4_col1,
+    <span class="pl-smi">left_buttons</span>,
+    <span class="pl-smi">keyboard_report_state</span>,
+    <span class="pl-smi">timer</span>,
+);
+</pre></div>
+<p>In practice the macro code is inlined like this:</p>
+<div class="highlight highlight-rust"><pre><span class="pl-k">pub</span> <span class="pl-k">fn</span> <span class="pl-en">read_col_1_pins</span>(<span class="pl-smi">left_row0_col1</span><span class="pl-k">:</span> <span class="pl-k">&#x26;mut</span> <span class="pl-en">LeftRow0Col1</span>, <span class="pl-smi">left_row1_col1</span><span class="pl-k">:</span> <span class="pl-k">&#x26;mut</span> <span class="pl-en">LeftRow1Col1</span>, <span class="pl-smi">left_row2_col1</span><span class="pl-k">:</span> <span class="pl-k">&#x26;mut</span> <span class="pl-en">LeftRow2Col1</span>, <span class="pl-smi">left_row3_col1</span><span class="pl-k">:</span> <span class="pl-k">&#x26;mut</span> <span class="pl-en">LeftRow3Col1</span>, <span class="pl-smi">left_row4_col1</span><span class="pl-k">:</span> <span class="pl-k">&#x26;mut</span> <span class="pl-en">LeftRow4Col1</span>, <span class="pl-smi">left_buttons</span><span class="pl-k">:</span> <span class="pl-k">&#x26;mut</span> <span class="pl-en">LeftButtons</span>, <span class="pl-smi">keyboard_report_state</span><span class="pl-k">:</span> <span class="pl-k">&#x26;mut</span> <span class="pl-en">KeyboardReportState</span>, <span class="pl-smi">timer</span><span class="pl-k">:</span> <span class="pl-en">Timer</span>) <span class="pl-k">-></span> <span class="pl-en">bool</span> {
+    <span class="pl-k">let</span> <span class="pl-smi">col</span> <span class="pl-k">=</span> <span class="pl-k">unsafe</span> {
+        <span class="pl-smi">left_buttons</span><span class="pl-k">.</span>cols<span class="pl-k">.</span><span class="pl-c1">1</span>
+            <span class="pl-k">.</span><span class="pl-en">take</span>()<span class="pl-k">.</span><span class="pl-en">unwrap_unchecked</span>()
+    };
+    <span class="pl-k">let</span> <span class="pl-smi">col</span> <span class="pl-k">=</span> <span class="pl-smi">col</span><span class="pl-k">.</span><span class="pl-en">into_push_pull_output_in_state</span>(<span class="pl-en">PinState</span><span class="pl-k">::</span><span class="pl-en">Low</span>);
+    <span class="pl-k">crate::</span><span class="pl-en">timer</span><span class="pl-k">::</span><span class="pl-en">wait_nanos</span>(<span class="pl-smi">timer</span>, <span class="pl-c1">250</span>);
+    <span class="pl-k">let</span> <span class="pl-k">mut</span> <span class="pl-smi">any_change</span> <span class="pl-k">=</span> <span class="pl-c1">false</span>;
+    {
+        <span class="pl-k">if</span> <span class="pl-smi">left_row0_col1</span><span class="pl-k">.</span><span class="pl-en">check_update_state</span>(<span class="pl-smi">left_buttons</span><span class="pl-k">.</span><span class="pl-en">row_pin_is_low</span>(<span class="pl-en">rp2040_kbd_lib</span><span class="pl-k">::</span><span class="pl-en">matrix</span><span class="pl-k">::</span><span class="pl-en">RowIndex</span><span class="pl-k">::</span><span class="pl-en">from_value</span>(<span class="pl-c1">0</span>)), <span class="pl-smi">keyboard_report_state</span>, <span class="pl-smi">timer</span>) {
+            <span class="pl-smi">any_change</span> <span class="pl-k">=</span> <span class="pl-c1">true</span>;
+        }
+    }
+    {
+        <span class="pl-k">if</span> <span class="pl-smi">left_row1_col1</span><span class="pl-k">.</span><span class="pl-en">check_update_state</span>(<span class="pl-smi">left_buttons</span><span class="pl-k">.</span><span class="pl-en">row_pin_is_low</span>(<span class="pl-en">rp2040_kbd_lib</span><span class="pl-k">::</span><span class="pl-en">matrix</span><span class="pl-k">::</span><span class="pl-en">RowIndex</span><span class="pl-k">::</span><span class="pl-en">from_value</span>(<span class="pl-c1">1</span>)), <span class="pl-smi">keyboard_report_state</span>, <span class="pl-smi">timer</span>) {
+            <span class="pl-smi">any_change</span> <span class="pl-k">=</span> <span class="pl-c1">true</span>;
+        }
+    }
+    {
+        <span class="pl-k">if</span> <span class="pl-smi">left_row2_col1</span><span class="pl-k">.</span><span class="pl-en">check_update_state</span>(<span class="pl-smi">left_buttons</span><span class="pl-k">.</span><span class="pl-en">row_pin_is_low</span>(<span class="pl-en">rp2040_kbd_lib</span><span class="pl-k">::</span><span class="pl-en">matrix</span><span class="pl-k">::</span><span class="pl-en">RowIndex</span><span class="pl-k">::</span><span class="pl-en">from_value</span>(<span class="pl-c1">2</span>)), <span class="pl-smi">keyboard_report_state</span>, <span class="pl-smi">timer</span>) {
+            <span class="pl-smi">any_change</span> <span class="pl-k">=</span> <span class="pl-c1">true</span>;
+        }
+    }
+    {
+        <span class="pl-k">if</span> <span class="pl-smi">left_row3_col1</span><span class="pl-k">.</span><span class="pl-en">check_update_state</span>(<span class="pl-smi">left_buttons</span><span class="pl-k">.</span><span class="pl-en">row_pin_is_low</span>(<span class="pl-en">rp2040_kbd_lib</span><span class="pl-k">::</span><span class="pl-en">matrix</span><span class="pl-k">::</span><span class="pl-en">RowIndex</span><span class="pl-k">::</span><span class="pl-en">from_value</span>(<span class="pl-c1">3</span>)), <span class="pl-smi">keyboard_report_state</span>, <span class="pl-smi">timer</span>) {
+            <span class="pl-smi">any_change</span> <span class="pl-k">=</span> <span class="pl-c1">true</span>;
+        }
+    }
+    {
+        <span class="pl-k">if</span> <span class="pl-smi">left_row4_col1</span><span class="pl-k">.</span><span class="pl-en">check_update_state</span>(<span class="pl-smi">left_buttons</span><span class="pl-k">.</span><span class="pl-en">row_pin_is_low</span>(<span class="pl-en">rp2040_kbd_lib</span><span class="pl-k">::</span><span class="pl-en">matrix</span><span class="pl-k">::</span><span class="pl-en">RowIndex</span><span class="pl-k">::</span><span class="pl-en">from_value</span>(<span class="pl-c1">4</span>)), <span class="pl-smi">keyboard_report_state</span>, <span class="pl-smi">timer</span>) {
+            <span class="pl-smi">any_change</span> <span class="pl-k">=</span> <span class="pl-c1">true</span>;
+        }
+    }
+    <span class="pl-smi">left_buttons</span><span class="pl-k">.</span>cols<span class="pl-k">.</span><span class="pl-c1">1</span>
+        <span class="pl-k">=</span> <span class="pl-en">Some</span>(<span class="pl-smi">col</span><span class="pl-k">.</span><span class="pl-en">into_pull_up_input</span>());
+    {
+        <span class="pl-k">while</span> <span class="pl-smi">left_buttons</span><span class="pl-k">.</span><span class="pl-en">row_pin_is_low</span>(<span class="pl-en">rp2040_kbd_lib</span><span class="pl-k">::</span><span class="pl-en">matrix</span><span class="pl-k">::</span><span class="pl-en">RowIndex</span><span class="pl-k">::</span><span class="pl-en">from_value</span>(<span class="pl-c1">0</span>)) {}
+    }
+    {
+        <span class="pl-k">while</span> <span class="pl-smi">left_buttons</span><span class="pl-k">.</span><span class="pl-en">row_pin_is_low</span>(<span class="pl-en">rp2040_kbd_lib</span><span class="pl-k">::</span><span class="pl-en">matrix</span><span class="pl-k">::</span><span class="pl-en">RowIndex</span><span class="pl-k">::</span><span class="pl-en">from_value</span>(<span class="pl-c1">1</span>)) {}
+    }
+    {
+        <span class="pl-k">while</span> <span class="pl-smi">left_buttons</span><span class="pl-k">.</span><span class="pl-en">row_pin_is_low</span>(<span class="pl-en">rp2040_kbd_lib</span><span class="pl-k">::</span><span class="pl-en">matrix</span><span class="pl-k">::</span><span class="pl-en">RowIndex</span><span class="pl-k">::</span><span class="pl-en">from_value</span>(<span class="pl-c1">2</span>)) {}
+    }
+    {
+        <span class="pl-k">while</span> <span class="pl-smi">left_buttons</span><span class="pl-k">.</span><span class="pl-en">row_pin_is_low</span>(<span class="pl-en">rp2040_kbd_lib</span><span class="pl-k">::</span><span class="pl-en">matrix</span><span class="pl-k">::</span><span class="pl-en">RowIndex</span><span class="pl-k">::</span><span class="pl-en">from_value</span>(<span class="pl-c1">3</span>)) {}
+    }
+    {
+        <span class="pl-k">while</span> <span class="pl-smi">left_buttons</span><span class="pl-k">.</span><span class="pl-en">row_pin_is_low</span>(<span class="pl-en">rp2040_kbd_lib</span><span class="pl-k">::</span><span class="pl-en">matrix</span><span class="pl-k">::</span><span class="pl-en">RowIndex</span><span class="pl-k">::</span><span class="pl-en">from_value</span>(<span class="pl-c1">4</span>)) {}
+    }
+    <span class="pl-smi">any_change</span>
+}
+</pre></div>
+<p>There is no access by index for the pins here, they are manually checked one-by-one.</p>
+<h3>Performance summary</h3>
+<p>In the end I took 4 measurements on the left side:</p>
+<ol>
+<li>Scan latency
+<li>Change originating from left scan loop latency
+<li>Change originating from right scan loop latency
+<li>Inter-core message queue capacity
+</ol>
+<p>And 3 on the right:</p>
+<ol>
+<li>Scan latency
+<li>Change loop latency
+<li>Inter-core message queue capacity
+</ol>
+<p>The scan latency has been talked about, it ended up at about <code>20μs</code> after optimizations,
+that is, each pin is checked every <code>20μs</code> if the keyboard is idle (on both sides).</p>
+<p>Changes originating from the left measures the loop latency, the time it takes before discovering a change
+to completely processing it, when a change comes from the left side gpio pins. That landed on about
+<code>60μs</code>. In other words, from starting to check for changes, to discovering and handling a change is
+<code>60μs</code>.</p>
+<p>Changes originating from the right measures the same as above but from the right side, that takes about
+<code>70μs</code>.</p>
+<p>Inter-core message queue capacity sits firmly at 0 on both sides, even though the consumer-core writes messages to oled,
+it doesn't get overwhelmed.</p>
+<p>On the right-side the latency on changes is only <code>25μs</code> however, since the
+left side handles all the logic contained in the keymap, this makes sense.</p>
+<h4>Rough calculation of worst case latency</h4>
+<p>This means that the keyboard <em>should</em> at most add a <code>70μs</code> latency overhead from the left, and <code>25μs</code> on the right,
+and be able to detect a change lasting for <code>20μs</code> or more on both sides.</p>
+<p>The transfer rate between sides is set by the uart baud-rate which is <code>781 250</code> bits per second.<br>
+This calculates to <code>10.24μs</code> per byte sent, all messages sent are at most <code>1</code> byte.</p>
+<hr>
+<p><em>Edit 2040-04-17</em></p>
+<p>I changed to protocol to be two bytes for robustness, but updated the baud-rate to 20x.</p>
+<p>This puts one message at <code>1.024μs</code> of latency with better robustness.</p>
+<hr>
+<p>Worst case scenario <em>should</em> therefore be the <code>os_poll_latency + left_side_right_change_latency + right_side_latency + transfer_latency</code>,
+which would be <code>1000μs + 70μs + 25μs + 10μs = 1105μs</code>, when a single key is pressed on the right side,<code>os_poll_latency + left_side_left_change_latency = 1060μs</code> on the left.</p>
+<h4>Caveat</h4>
+<p>This only holds for single presses, if the keymap outputs sequences like when I press <code>^</code>, on eu keyboards
+that needs a second press to activate, so that you can send symbols like <code>â</code>. However, I don't do that, I want <code>^</code>
+to go out immediately so when <code>^</code> is pressed, I send KeyDown <code>^</code> + KeyUp <code>^</code> + KeyDown <code>^</code>
+which makes the os-latency alone be <code>3000μs</code>.</p>
+<h2>End</h2>
+<p>This has been my longest writeup yet, it was my first real foray into embedded development, and it ended with
+me writing this on a keyboard running my own firmware.</p>
+<p>There's still stuff to iron out with the keymap, but I'm really happy with the result.<br>
+The firmware is fast and works, the two things that I care about, the code can be found <a href="https://github.com/MarcusGrass/rp2040-kbd">here</a>.</p>
+<h3>Thoughts on QMK</h3>
+<p>I went on a bit of a rant on QMK, but it's a great robust codebase, it could probably be reimplemented in Rust
+if one really wanted to, but it seems unnecessary, and my firmware does not at all attempt to do it.<br>
+Mostly the macro-parts would need some thinking over, because the way I did keymaps were a real mess of boilerplate-code
+that is not nice to work with.</p>
+</div>
+</div>
